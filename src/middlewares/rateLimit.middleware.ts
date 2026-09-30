@@ -1,0 +1,42 @@
+import rateLimit from 'express-rate-limit';
+
+const tooMany = (message: string) => ({ error: { code: 'TOO_MANY_REQUESTS', message } });
+
+// Login, seleção de empresa e recuperação de senha: dificulta força bruta.
+// Só as tentativas que falham contam para o limite.
+export const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooMany('Muitas tentativas. Tente novamente em alguns minutos.'),
+});
+
+// Renovação da sessão: roda a cada carregamento de página, então tem um
+// limite próprio e bem mais folgado (não disputa com o de login).
+export const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooMany('Muitas requisições. Tente novamente em instantes.'),
+});
+
+// Cadastro público (empresa ou funcionário): conta todas as tentativas,
+// inclusive as que dão certo, para ninguém criar contas em massa.
+export const signupRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooMany('Muitos cadastros a partir desta rede. Tente novamente mais tarde.'),
+});
+
+export const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooMany('Muitas requisições. Tente novamente em instantes.'),
+});

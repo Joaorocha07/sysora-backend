@@ -1,0 +1,51 @@
+import { Request, Response, Router } from 'express';
+import { Role } from '@prisma/client';
+import { z } from 'zod';
+import { asyncHandler } from '../../lib/asyncHandler';
+import { HttpError } from '../../lib/httpError';
+import { prisma } from '../../lib/prisma';
+import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
+import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
+import { validate } from '../../middlewares/validate.middleware';
+import * as connection from './whatsapp.connection';
+
+const sendTestSchema = z.object({
+  to: z.string().trim().min(8, 'Informe um número de WhatsApp válido.'),
+});
+
+async function status(companyId: string) {
+  const state = connection.getConnectionState(companyId);
+  if (state.status !== 'disconnected' || state.error) return state;
+  // Sessão salva, mas ainda não aberta neste processo (ex.: servidor acabou de subir).
+  const settings = await prisma.companySettings.findUnique({ where: { companyId } });
+  if (settings?.whatsappConnected) return { ...state, status: 'connecting' as const, phone: settings.whatsappPhone };
+  return state;
+}
+
+export const whatsappRouter = Router();
+
+whatsappRouter.use(authenticate, requireCompany, requireActiveSubscription);
+
+whatsappRouter.get('/status', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await status(companyOf(req)));
+}));
+
+// Gera o QR Code (estilo WhatsApp Web). O frontend consulta /status até conectar.
+whatsappRouter.post('/connect', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await connection.connect(companyOf(req)));
+}));
+
+whatsappRouter.post('/disconnect', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  await connection.disconnect(companyId);
+  await prisma.whatsAppSession.deleteMany({ where: { companyId } });
+  return res.json(connection.getConnectionState(companyId));
+}));
+
+whatsappRouter.post('/test', requireRole(Role.ADMIN), validate(sendTestSchema), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  const jid = await connection.findWhatsAppJid(companyId, req.body.to.replace(/\D/g, ''));
+  if (!jid) throw HttpError.badRequest('Esse número não tem WhatsApp. Confira o DDI e o DDD (ex.: 5531999999999).');
+  await connection.sendText(companyId, jid, 'Mensagem de teste do Sysora. Sua conexão com o WhatsApp está funcionando!');
+  return res.json({ message: 'Mensagem de teste enviada.' });
+}));

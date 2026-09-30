@@ -1,0 +1,370 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// Papel do usuário dentro de uma empresa. O admin master (dono do SaaS) não é
+// um papel de empresa: é User.isSuperAdmin.
+enum Role {
+  ADMIN
+  EMPLOYEE
+}
+
+// Vínculo pedido pelo próprio funcionário (tela de cadastro) aguarda o admin aprovar.
+enum MembershipStatus {
+  PENDING
+  ACTIVE
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  COMPLETED
+  CANCELED
+  NO_SHOW
+}
+
+// Quem criou/alterou: o bot do WhatsApp ou a equipe pelo sistema.
+enum Source {
+  BOT
+  STAFF
+}
+
+// Remetente de uma mensagem da conversa com o cliente.
+enum MessageSender {
+  CLIENT
+  BOT
+  STAFF
+}
+
+// Planos pagos (limites e preços em src/lib/plans.ts).
+enum Plan {
+  INICIAL
+  AVANCADO
+}
+
+// TRIAL: teste grátis até trialEndsAt. ACTIVE: pago até paidUntil.
+// PAST_DUE: pagamento atrasado (ainda dentro da tolerância). CANCELED: sem acesso.
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+// Assinatura de um cliente do SaaS. O plano é da conta, não da empresa: no
+// Avançado o mesmo dono tem até duas empresas, cada uma com o seu WhatsApp.
+model Account {
+  id          String             @id @default(uuid())
+  name        String
+  plan        Plan               @default(INICIAL)
+  status      SubscriptionStatus @default(TRIAL)
+  trialEndsAt DateTime?
+  paidUntil   DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  companies Company[]
+
+  @@map("accounts")
+}
+
+// Uma empresa (tenant). Todo dado de negócio pertence a uma Company, e cada
+// Company tem a sua própria conexão de WhatsApp.
+model Company {
+  id           String   @id @default(uuid())
+  accountId    String
+  name         String
+  slug         String   @unique
+  document     String?
+  phone        String?
+  email        String?
+  // Código que o funcionário informa no cadastro para pedir acesso à empresa.
+  inviteCode   String   @unique
+  // Empresa criada pelo cadastro público do site (e não pelo admin master).
+  selfSignup   Boolean  @default(false)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships      CompanyMembership[]
+  clients          Client[]
+  services         Service[]
+  appointments     Appointment[]
+  messages         Message[]
+  settings         CompanySettings?
+  refreshTokens    RefreshToken[]
+  whatsappSessions WhatsAppSession[]
+  whatsappAuth     WhatsAppAuth[]
+  account          Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@map("companies")
+}
+
+// Conta de usuário. O e-mail é único no sistema; o acesso a cada empresa é
+// controlado por CompanyMembership.
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  active       Boolean  @default(true)
+  // Admin master: gerencia todas as empresas do SaaS e pode entrar em
+  // qualquer uma com permissão de administrador.
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships   CompanyMembership[]
+  refreshTokens RefreshToken[]
+  appointments  Appointment[]       @relation("AppointmentStaff")
+
+  @@map("users")
+}
+
+// Vínculo do usuário com uma empresa + papel dentro dela.
+model CompanyMembership {
+  id        String   @id @default(uuid())
+  userId    String
+  companyId String
+  role      Role             @default(EMPLOYEE)
+  active    Boolean          @default(true)
+  status    MembershipStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId])
+  @@index([companyId])
+  @@map("company_memberships")
+}
+
+// Refresh tokens opacos com rotação. Só o hash (SHA-256) fica no banco.
+// companyId nulo = sessão do admin master no painel master.
+model RefreshToken {
+  id                  String    @id @default(uuid())
+  userId              String
+  companyId           String?
+  tokenHash           String    @unique
+  expiresAt           DateTime
+  revokedAt           DateTime?
+  replacedByTokenHash String?
+  createdAt           DateTime  @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// Cliente final da empresa. Criado à mão pela equipe ou automaticamente pelo
+// bot quando alguém manda mensagem no WhatsApp.
+model Client {
+  id            String   @id @default(uuid())
+  companyId     String
+  name          String
+  phone         String
+  email         String?
+  birthday      String?
+  notes         String?
+  // wa_id do WhatsApp (ex.: 5531999999999), destino das mensagens do sistema.
+  whatsappId    String?
+  source        Source   @default(STAFF)
+  lastMessageAt DateTime?
+  // Mensagens do cliente ainda não vistas pela equipe (caixa de conversas).
+  unreadCount   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+  messages     Message[]
+
+  @@index([companyId])
+  @@index([companyId, whatsappId])
+  @@map("clients")
+}
+
+// Serviço oferecido pela empresa (ex.: corte, consulta, aula experimental).
+model Service {
+  id              String   @id @default(uuid())
+  companyId       String
+  name            String
+  description     String?
+  durationMinutes Int      @default(60)
+  // Preço em centavos, para não perder precisão.
+  priceCents      Int      @default(0)
+  active          Boolean  @default(true)
+  // Ordem na lista oferecida pelo bot.
+  position        Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company      Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  appointments AppointmentItem[]
+
+  @@index([companyId])
+  @@map("services")
+}
+
+// Horário marcado. date/startTime/endTime ficam no fuso da empresa (TZ do
+// servidor) como texto: AAAA-MM-DD e HH:mm.
+model Appointment {
+  id                     String            @id @default(uuid())
+  companyId              String
+  clientId               String
+  staffId                String?
+  date                   String
+  startTime              String
+  endTime                String
+  status                 AppointmentStatus @default(SCHEDULED)
+  source                 Source            @default(STAFF)
+  notes                  String?
+  totalCents             Int               @default(0)
+  // Lembretes do bot (véspera e pouco antes) e resposta do cliente.
+  reminderSentAt         DateTime?
+  hourReminderSentAt     DateTime?
+  confirmedAt            DateTime?
+  canceledAt             DateTime?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+
+  company Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  staff   User?             @relation("AppointmentStaff", fields: [staffId], references: [id], onDelete: SetNull)
+  items   AppointmentItem[]
+
+  @@index([companyId, date])
+  @@index([clientId])
+  @@map("appointments")
+}
+
+// Serviços de um agendamento. Guarda nome, duração e preço do momento da
+// marcação: mudar o catálogo depois não altera agendamentos antigos.
+model AppointmentItem {
+  id              String  @id @default(uuid())
+  appointmentId   String
+  serviceId       String?
+  name            String
+  durationMinutes Int
+  priceCents      Int
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  service     Service?    @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  @@index([appointmentId])
+  @@map("appointment_items")
+}
+
+// Histórico da conversa no WhatsApp com o cliente.
+model Message {
+  id        String        @id @default(uuid())
+  companyId String
+  clientId  String
+  text      String
+  sender    MessageSender
+  // Nome de quem da equipe respondeu pelo sistema.
+  staffName String?
+  createdAt DateTime      @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+  @@index([companyId, createdAt])
+  @@map("messages")
+}
+
+model CompanySettings {
+  companyId String @id
+
+  // Horário de funcionamento (usado pelo bot e pela agenda).
+  // workDays: 0 = domingo ... 6 = sábado.
+  openingTime  String  @default("09:00")
+  closingTime  String  @default("18:00")
+  workDays     Int[]   @default([1, 2, 3, 4, 5, 6])
+  // Grade de horários oferecida pelo bot e quantos atendimentos simultâneos.
+  slotMinutes  Int     @default(30)
+  slotCapacity Int     @default(1)
+  lunchEnabled Boolean @default(false)
+  lunchStart   String  @default("12:00")
+  lunchEnd     String  @default("13:00")
+
+  // WhatsApp conectado pelo QR Code (WhatsApp Web).
+  whatsappConnected Boolean @default(false)
+  whatsappPhone     String?
+
+  // Chatbot. As mensagens aceitam {nome}, {empresa}, {servico}, {data} e {hora}.
+  botEnabled             Boolean @default(true)
+  autoCreateClient       Boolean @default(true)
+  askName                Boolean @default(true)
+  greetingMessage        String  @default("Olá, {nome}! Bem-vindo(a) à {empresa}.")
+  handoffMessage         String  @default("Certo! Uma pessoa da nossa equipe vai te responder por aqui em instantes.")
+  confirmationMessage    String  @default("Agendado! {servico} no dia {data} às {hora}. Até lá, {nome}!")
+  reminderEnabled        Boolean @default(true)
+  reminderTime           String  @default("10:00")
+  reminderMessage        String  @default("Oi, {nome}! Passando para lembrar do seu horário amanhã: {servico} no dia {data} às {hora}.")
+  hourReminderEnabled    Boolean @default(true)
+  hourReminderMinutes    Int     @default(60)
+  hourReminderMessage    String  @default("Oi, {nome}! Seu horário é hoje às {hora}: {servico}. Te esperamos!")
+  // Quando a equipe responde, o bot fica em silêncio com o cliente até
+  // humanTimeoutMinutes sem mensagem da equipe.
+  pauseOnStaffReply      Boolean @default(true)
+  humanTimeoutMinutes    Int     @default(30)
+  humanEndMessage        String  @default("Seu atendimento com a nossa equipe foi encerrado. Obrigado pelo contato!")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("company_settings")
+}
+
+// Estado da conversa do bot com um número (menu, etapas do agendamento ou
+// HUMAN = equipe atendendo). Apagado quando o fluxo termina ou expira.
+model WhatsAppSession {
+  id        String   @id @default(uuid())
+  companyId String
+  phone     String
+  step      String
+  data      Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, phone])
+  @@map("whatsapp_sessions")
+}
+
+// Credenciais do WhatsApp Web (Baileys) de cada empresa, criptografadas.
+model WhatsAppAuth {
+  companyId String
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, key])
+  @@map("whatsapp_auth")
+}
