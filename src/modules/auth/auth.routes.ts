@@ -6,6 +6,7 @@ import * as controller from './auth.controller';
 import {
   changePasswordSchema,
   forgotPasswordSchema,
+  googleLoginSchema,
   loginSchema,
   registerCompanySchema,
   registerEmployeeSchema,
@@ -17,6 +18,7 @@ import {
 export const authRouter = Router();
 
 authRouter.post('/login', authRateLimiter, validate(loginSchema), controller.login);
+authRouter.post('/google', authRateLimiter, validate(googleLoginSchema), controller.googleLogin);
 authRouter.post('/login/company', authRateLimiter, validate(selectCompanySchema), controller.selectCompany);
 authRouter.post('/refresh', refreshRateLimiter, controller.refresh);
 authRouter.post('/logout', controller.logout);

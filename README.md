@@ -35,6 +35,14 @@ O plano pertence à **conta** (`Account`), não à empresa: no Avançado a mesma
 - `GET /api/auth/invite/:code`: nome da empresa do código, para conferir antes de enviar.
 - Os cadastros têm um limite próprio de 10 por hora por IP.
 
+## Login com Google (Supabase Auth)
+
+O frontend faz o OAuth do Google pelo Supabase Auth e envia o access token do Supabase para `POST /api/auth/google`. O backend confere o token com o Supabase (`SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY`), exige identidade Google com e-mail confirmado e emite a sessão do Sysora (a mesma do login por senha).
+
+- E-mail já cadastrado: entra direto (ou escolhe a empresa, se tiver várias).
+- E-mail novo: responde `signup-required` com um `signupToken` (30 min). O cadastro (`/register` ou `/register-employee`) aceita `googleToken` no lugar de `email` + `password`.
+- Com o banco no Supabase, a migration `enable_rls` liga o RLS em todas as tabelas para a Data API não expor nada com a chave publicável. Tabelas novas precisam do `ENABLE ROW LEVEL SECURITY` na migration.
+
 ## Perfis de acesso
 
 | Perfil | Onde entra | O que faz |

@@ -5,12 +5,15 @@ import { uniqueCompanySlug } from '../../lib/slug';
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { comparePassword, hashPassword } from '../../lib/password';
+import { verifyGoogleAccessToken } from '../../lib/supabase';
 import {
   generateOpaqueToken,
   hashToken,
   refreshTokenExpiryDate,
   signAccessToken,
+  signGoogleSignupToken,
   signPreAuthToken,
+  verifyGoogleSignupToken,
   verifyPreAuthToken,
 } from '../../lib/jwt';
 
@@ -20,7 +23,7 @@ import {
 // - Admin/funcionário: entra direto na empresa; se tiver acesso a mais de
 //   uma, escolhe qual (pre-auth token de curta duração).
 
-export type SessionUser = { id: string; name: string; email: string; isSuperAdmin: boolean };
+export type SessionUser = { id: string; name: string; email: string; isSuperAdmin: boolean; avatarUrl: string | null };
 export type SessionCompany = { id: string; name: string; slug: string };
 
 export type SessionResult = {
@@ -70,7 +73,7 @@ async function issueSession(userId: string, companyId: string | null): Promise<S
     accessToken: signAccessToken({ sub: userId, companyId, role, isSuperAdmin: user.isSuperAdmin }),
     refreshToken,
     refreshTokenExpiresAt,
-    user: { id: user.id, name: user.name, email: user.email, isSuperAdmin: user.isSuperAdmin },
+    user: { id: user.id, name: user.name, email: user.email, isSuperAdmin: user.isSuperAdmin, avatarUrl: user.avatarUrl },
     company: company ? { id: company.id, name: company.name, slug: company.slug } : null,
     role,
     subscription: company ? subscriptionSummary(company.account) : null,
@@ -95,7 +98,29 @@ export async function login(input: { email: string; password: string }): Promise
   const invalidCredentials = () => HttpError.unauthorized('E-mail ou senha inválidos.');
   if (!user || !user.active) throw invalidCredentials();
   if (!(await comparePassword(input.password, user.passwordHash))) throw invalidCredentials();
+  return startLogin(user);
+}
 
+export type GoogleLoginResult =
+  | LoginResult
+  | { status: 'signup-required'; signupToken: string; email: string; name: string; avatarUrl: string | null };
+
+// Login com Google (Supabase Auth). E-mail já cadastrado entra como no login
+// por senha (e atualiza a foto); e-mail novo recebe um token para concluir o cadastro.
+export async function loginWithGoogle(accessToken: string): Promise<GoogleLoginResult> {
+  const profile = await verifyGoogleAccessToken(accessToken);
+  const user = await prisma.user.findUnique({ where: { email: profile.email } });
+  if (!user) return { status: 'signup-required', signupToken: signGoogleSignupToken(profile), ...profile };
+  if (!user.active) throw HttpError.unauthorized('Usuário inativo.');
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { avatarUrl: profile.avatarUrl ?? user.avatarUrl, googleLinkedAt: user.googleLinkedAt ?? new Date() },
+  });
+  return startLogin(user);
+}
+
+async function startLogin(user: { id: string; isSuperAdmin: boolean }): Promise<LoginResult> {
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
   if (user.isSuperAdmin) return { status: 'ok', session: await issueSession(user.id, null) };
 
   const companies = await activeCompanies(user.id);
@@ -153,7 +178,7 @@ export async function revokeRefreshToken(rawRefreshToken: string): Promise<void>
 
 export async function me(auth: { userId: string; companyId: string | null; role: Role | null }) {
   const [user, company] = await Promise.all([
-    prisma.user.findUniqueOrThrow({ where: { id: auth.userId }, select: { id: true, name: true, email: true, isSuperAdmin: true } }),
+    prisma.user.findUniqueOrThrow({ where: { id: auth.userId }, select: { id: true, name: true, email: true, isSuperAdmin: true, avatarUrl: true } }),
     auth.companyId ? prisma.company.findUnique({ where: { id: auth.companyId }, select: { id: true, name: true, slug: true } }) : null,
   ]);
   return { user, company, role: auth.role };
@@ -198,15 +223,40 @@ export async function changePassword(userId: string, currentPassword: string, ne
 
 // Dono de uma empresa nova: cria a conta (em teste grátis no plano escolhido),
 // a empresa e o usuário administrador, e já entra.
-export async function registerCompany(input: { companyName: string; name: string; email: string; phone?: string | null; password: string; plan: Plan }) {
-  if (await prisma.user.findUnique({ where: { email: input.email } })) {
+type Credentials = { email?: string; password?: string; googleToken?: string };
+
+// Cadastro com senha ou com o token de cadastro do login com Google. Quem
+// entra pelo Google recebe uma senha aleatória (pode criar uma pelo
+// "Esqueci minha senha") e o e-mail vem do token, não do formulário.
+// `google` traz a foto e a data do vínculo para gravar no usuário.
+function resolveCredentials(input: Credentials): {
+  email: string;
+  password: string;
+  google: { avatarUrl: string | null; googleLinkedAt: Date } | null;
+} {
+  if (input.googleToken) {
+    let token;
+    try {
+      token = verifyGoogleSignupToken(input.googleToken);
+    } catch {
+      throw HttpError.unauthorized('O cadastro com Google expirou. Entre com o Google novamente.');
+    }
+    return { email: token.email, password: generateOpaqueToken(), google: { avatarUrl: token.avatarUrl ?? null, googleLinkedAt: new Date() } };
+  }
+  if (!input.email || !input.password) throw HttpError.badRequest('Informe o e-mail e a senha.');
+  return { email: input.email, password: input.password, google: null };
+}
+
+export async function registerCompany(input: Credentials & { companyName: string; name: string; phone?: string | null; plan: Plan }) {
+  const { email, password, google } = resolveCredentials(input);
+  if (await prisma.user.findUnique({ where: { email } })) {
     throw HttpError.conflict('Este e-mail já tem uma conta no Sysora. Entre com ele ou use outro e-mail.');
   }
 
   const [slug, inviteCode, passwordHash] = await Promise.all([
     uniqueCompanySlug(input.companyName),
     uniqueInviteCode(),
-    hashPassword(input.password),
+    hashPassword(password),
   ]);
 
   const created = await prisma.$transaction(async (tx) => {
@@ -219,13 +269,13 @@ export async function registerCompany(input: { companyName: string; name: string
         name: input.companyName,
         slug,
         inviteCode,
-        email: input.email,
+        email,
         phone: input.phone || null,
         selfSignup: true,
         settings: { create: {} },
       },
     });
-    const user = await tx.user.create({ data: { name: input.name, email: input.email, phone: input.phone || null, passwordHash } });
+    const user = await tx.user.create({ data: { name: input.name, email, phone: input.phone || null, passwordHash, ...google, lastLoginAt: new Date() } });
     await tx.companyMembership.create({ data: { userId: user.id, companyId: company.id, role: Role.ADMIN } });
     return { userId: user.id, companyId: company.id };
   });
@@ -241,22 +291,30 @@ export async function lookupInvite(code: string) {
 }
 
 // Funcionário pede acesso com o código da empresa; entra só depois que o admin aprovar.
-export async function registerEmployee(input: { inviteCode: string; name: string; email: string; phone?: string | null; password: string }) {
+export async function registerEmployee(input: Credentials & { inviteCode: string; name: string; phone?: string | null }) {
   const company = await prisma.company.findUnique({ where: { inviteCode: normalizeInviteCode(input.inviteCode) } });
   if (!company || !company.active) throw HttpError.notFound('Código não encontrado. Confira com o administrador da empresa.');
 
-  let user = await prisma.user.findUnique({ where: { email: input.email } });
+  const { email, password, google } = resolveCredentials(input);
+  let user = await prisma.user.findUnique({ where: { email } });
   if (user) {
-    // Conta já existe (ex.: trabalha em outra empresa): confirma que é o dono dela.
-    if (user.isSuperAdmin || !(await comparePassword(input.password, user.passwordHash))) {
+    // Conta já existe (ex.: trabalha em outra empresa): confirma que é o dono
+    // dela. Pelo Google o e-mail já foi confirmado.
+    if (user.isSuperAdmin || (!google && !(await comparePassword(password, user.passwordHash)))) {
       throw HttpError.conflict('Este e-mail já tem uma conta no Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
     }
     const existing = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId: user.id, companyId: company.id } } });
     if (existing?.status === MembershipStatus.PENDING) throw HttpError.conflict('Você já pediu acesso a esta empresa. Aguarde a aprovação do administrador.');
     if (existing) throw HttpError.conflict('Você já faz parte desta empresa. É só entrar.');
+    if (google) {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { avatarUrl: google.avatarUrl ?? user.avatarUrl, googleLinkedAt: user.googleLinkedAt ?? google.googleLinkedAt },
+      });
+    }
   } else {
     user = await prisma.user.create({
-      data: { name: input.name, email: input.email, phone: input.phone || null, passwordHash: await hashPassword(input.password) },
+      data: { name: input.name, email, phone: input.phone || null, passwordHash: await hashPassword(password), ...google },
     });
   }
 

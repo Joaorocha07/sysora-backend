@@ -39,6 +39,26 @@ export function verifyPreAuthToken(token: string): PreAuthTokenPayload {
   return decoded;
 }
 
+// E-mail confirmado pelo Google que ainda não tem conta: vale para concluir o
+// cadastro (empresa ou pedido de acesso) sem senha.
+export type GoogleSignupTokenPayload = {
+  type: 'google-signup';
+  email: string;
+  name: string;
+  avatarUrl: string | null;
+};
+
+export function signGoogleSignupToken(payload: Omit<GoogleSignupTokenPayload, 'type'>): string {
+  const body: GoogleSignupTokenPayload = { type: 'google-signup', ...payload };
+  return jwt.sign(body, env.JWT_PREAUTH_SECRET, { expiresIn: '30m' });
+}
+
+export function verifyGoogleSignupToken(token: string): GoogleSignupTokenPayload {
+  const decoded = jwt.verify(token, env.JWT_PREAUTH_SECRET) as GoogleSignupTokenPayload;
+  if (decoded.type !== 'google-signup') throw new Error('Tipo de token inválido.');
+  return decoded;
+}
+
 // Refresh tokens são opacos: um valor aleatório enviado ao cliente, do qual
 // só guardamos o hash SHA-256 no banco.
 export function generateOpaqueToken(): string {

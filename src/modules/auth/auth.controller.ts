@@ -30,7 +30,18 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   return sessionResponse(res, result.session);
 });
 
-export const signupConfig = (_req: Request, res: Response) => res.json({ companySignup: env.PUBLIC_SIGNUP_ENABLED });
+export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
+  const result = await authService.loginWithGoogle(req.body.accessToken);
+  if (result.status === 'select-company') {
+    return res.json({ status: 'select-company', preAuthToken: result.preAuthToken, companies: result.companies });
+  }
+  if (result.status === 'signup-required') {
+    return res.json({ status: 'signup-required', signupToken: result.signupToken, email: result.email, name: result.name, avatarUrl: result.avatarUrl });
+  }
+  return sessionResponse(res, result.session);
+});
+
+export const signupConfig =(_req: Request, res: Response) => res.json({ companySignup: env.PUBLIC_SIGNUP_ENABLED });
 
 export const registerCompany = asyncHandler(async (req: Request, res: Response) => {
   if (!env.PUBLIC_SIGNUP_ENABLED) throw HttpError.forbidden('O cadastro de novas empresas está fechado. Fale com a equipe do Sysora.');

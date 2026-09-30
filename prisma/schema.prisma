@@ -119,6 +119,11 @@ model User {
   // Admin master: gerencia todas as empresas do SaaS e pode entrar em
   // qualquer uma com permissão de administrador.
   isSuperAdmin Boolean  @default(false)
+  // Foto do perfil do Google, atualizada a cada login com Google.
+  avatarUrl      String?
+  // Primeira vez que entrou com Google (nulo = só usa e-mail e senha).
+  googleLinkedAt DateTime?
+  lastLoginAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

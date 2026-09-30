@@ -35,6 +35,10 @@ const schema = z.object({
   MASTER_EMAIL: z.string().optional(),
   MASTER_PASSWORD: z.string().optional(),
 
+  // Login com Google (Supabase Auth). Sem estas duas o login com Google fica desligado.
+  SUPABASE_URL: z.string().url('SUPABASE_URL inválida').optional().or(z.literal('').transform(() => undefined)),
+  SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
+
   // E-mail (recuperação de senha). Sem SMTP_HOST o link aparece no terminal.
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().default(587),

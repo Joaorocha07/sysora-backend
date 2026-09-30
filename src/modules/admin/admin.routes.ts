@@ -51,6 +51,10 @@ adminRouter.get('/stats', asyncHandler(async (_req: Request, res: Response) => {
   return res.json(await adminService.stats());
 }));
 
+adminRouter.get('/users', asyncHandler(async (_req: Request, res: Response) => {
+  return res.json({ users: await adminService.listUsers() });
+}));
+
 adminRouter.get('/plans', (_req: Request, res: Response) => res.json({ plans: planCatalog() }));
 
 adminRouter.get('/companies', asyncHandler(async (_req: Request, res: Response) => {

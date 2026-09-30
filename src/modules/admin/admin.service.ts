@@ -43,13 +43,43 @@ export async function stats() {
   };
 }
 
+// Todas as pessoas cadastradas no Sysora, com as empresas e o papel em cada uma.
+export async function listUsers() {
+  const users = await prisma.user.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: {
+      memberships: { include: { company: { select: { id: true, name: true, active: true } } }, orderBy: { createdAt: 'asc' } },
+    },
+  });
+  return users.map((u) => ({
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    phone: u.phone,
+    avatarUrl: u.avatarUrl,
+    isSuperAdmin: u.isSuperAdmin,
+    active: u.active,
+    google: Boolean(u.googleLinkedAt),
+    lastLoginAt: u.lastLoginAt,
+    createdAt: u.createdAt,
+    companies: u.memberships.map((m) => ({
+      id: m.company.id,
+      name: m.company.name,
+      companyActive: m.company.active,
+      role: m.role,
+      status: m.status,
+      active: m.active,
+    })),
+  }));
+}
+
 export async function listCompanies() {
   const companies = await prisma.company.findMany({
     orderBy: { createdAt: 'desc' },
     include: {
       account: true,
       settings: { select: { whatsappConnected: true, whatsappPhone: true } },
-      memberships: { where: { status: MembershipStatus.ACTIVE, user: { isSuperAdmin: false } }, include: { user: { select: { id: true, name: true, email: true } } } },
+      memberships: { where: { status: MembershipStatus.ACTIVE, user: { isSuperAdmin: false } }, include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } } },
       _count: { select: { clients: true, appointments: true, services: true } },
     },
   });

@@ -12,7 +12,7 @@ type MemberWithUser = {
   role: Role;
   active: boolean;
   createdAt: Date;
-  user: { id: string; name: string; email: string; phone: string | null; active: boolean };
+  user: { id: string; name: string; email: string; phone: string | null; active: boolean; avatarUrl: string | null };
 };
 
 function toMember(m: MemberWithUser) {
@@ -22,6 +22,7 @@ function toMember(m: MemberWithUser) {
     name: m.user.name,
     email: m.user.email,
     phone: m.user.phone,
+    avatarUrl: m.user.avatarUrl,
     role: m.role,
     active: m.active && m.user.active,
     createdAt: m.createdAt,
