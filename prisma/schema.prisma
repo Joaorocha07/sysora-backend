@@ -74,6 +74,17 @@ model Account {
   @@map("accounts")
 }
 
+// Configurações da plataforma, alteradas pelo admin master no painel.
+// Linha única (id = 1).
+model PlatformSettings {
+  id                  Int      @id @default(1)
+  // Cadastro de empresas pelo site (/cadastro). false = só o admin master cria empresas.
+  publicSignupEnabled Boolean  @default(true)
+  updatedAt           DateTime @updatedAt
+
+  @@map("platform_settings")
+}
+
 // Uma empresa (tenant). Todo dado de negócio pertence a uma Company, e cada
 // Company tem a sua própria conexão de WhatsApp.
 model Company {

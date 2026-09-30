@@ -3,6 +3,7 @@ import { env } from '../../config/env';
 import { asyncHandler } from '../../lib/asyncHandler';
 import { HttpError } from '../../lib/httpError';
 import { appUrl, isMailConfigured, passwordResetEmail, sendMail } from '../../lib/mailer';
+import { getPlatformSettings } from '../../lib/platformSettings';
 import * as authService from './auth.service';
 
 function cookieOptions() {
@@ -41,10 +42,15 @@ export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
   return sessionResponse(res, result.session);
 });
 
-export const signupConfig =(_req: Request, res: Response) => res.json({ companySignup: env.PUBLIC_SIGNUP_ENABLED });
+// O admin master liga/desliga o cadastro público no painel (Configurações).
+export const signupConfig = asyncHandler(async (_req: Request, res: Response) => {
+  const { publicSignupEnabled } = await getPlatformSettings();
+  return res.json({ companySignup: publicSignupEnabled });
+});
 
 export const registerCompany = asyncHandler(async (req: Request, res: Response) => {
-  if (!env.PUBLIC_SIGNUP_ENABLED) throw HttpError.forbidden('O cadastro de novas empresas está fechado. Fale com a equipe do Sysora.');
+  const { publicSignupEnabled } = await getPlatformSettings();
+  if (!publicSignupEnabled) throw HttpError.forbidden('O cadastro de novas empresas está fechado. Fale com a equipe do Sysora.');
   return sessionResponse(res.status(201), await authService.registerCompany(req.body));
 });
 

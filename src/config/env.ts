@@ -27,13 +27,9 @@ const schema = z.object({
   // banco da produção, para não disputarem a sessão do WhatsApp.
   WHATSAPP_ENABLED: bool('true'),
 
-  // Cadastro público de empresas pelo site (/cadastro). false = só o admin master cria empresas.
-  PUBLIC_SIGNUP_ENABLED: bool('true'),
-
-  // Admin master criado pelo seed (npm run seed).
-  MASTER_NAME: z.string().default('Admin Master'),
-  MASTER_EMAIL: z.string().optional(),
-  MASTER_PASSWORD: z.string().optional(),
+  // O cadastro público de empresas é ligado/desligado pelo admin master no
+  // painel (tabela platform_settings). MASTER_* e SEED_DEMO só valem para o
+  // `npm run seed` (prisma/seed.ts), não para o servidor.
 
   // Login com Google (Supabase Auth). Sem estas duas o login com Google fica desligado.
   SUPABASE_URL: z.string().url('SUPABASE_URL inválida').optional().or(z.literal('').transform(() => undefined)),

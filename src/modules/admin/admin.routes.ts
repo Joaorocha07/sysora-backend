@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { Plan, SubscriptionStatus } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
+import { getPlatformSettings, updatePlatformSettings } from '../../lib/platformSettings';
 import { planCatalog } from '../../lib/plans';
 import { authenticate, requireSuperAdmin } from '../../middlewares/auth.middleware';
 import { validate } from '../../middlewares/validate.middleware';
@@ -51,7 +52,18 @@ adminRouter.get('/stats', asyncHandler(async (_req: Request, res: Response) => {
   return res.json(await adminService.stats());
 }));
 
-adminRouter.get('/users', asyncHandler(async (_req: Request, res: Response) => {
+// Configurações da plataforma (ex.: cadastro público de empresas).
+const platformSettingsSchema = z.object({ publicSignupEnabled: z.boolean().optional() });
+
+adminRouter.get('/settings', asyncHandler(async (_req: Request, res: Response) => {
+  return res.json({ settings: await getPlatformSettings() });
+}));
+
+adminRouter.patch('/settings', validate(platformSettingsSchema), asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ settings: await updatePlatformSettings(req.body) });
+}));
+
+adminRouter.get('/users',asyncHandler(async (_req: Request, res: Response) => {
   return res.json({ users: await adminService.listUsers() });
 }));
 
