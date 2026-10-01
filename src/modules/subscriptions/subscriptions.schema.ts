@@ -6,3 +6,8 @@ export const checkoutSchema = z.object({
   payerEmail: z.string().email('E-mail inválido.'),
   plan: z.nativeEnum(Plan),
 });
+
+export const pixSchema = z.object({
+  payerEmail: z.string().email('E-mail inválido.'),
+  plan: z.nativeEnum(Plan),
+});

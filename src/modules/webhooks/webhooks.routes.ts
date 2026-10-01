@@ -3,7 +3,7 @@ import { asyncHandler } from '../../lib/asyncHandler';
 import { addMonth } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
-import { getMpSubscription } from '../subscriptions/subscriptions.service';
+import { applyPixPayment, getMpPayment, getMpSubscription } from '../subscriptions/subscriptions.service';
 
 export const webhooksRouter = Router();
 
@@ -19,6 +19,11 @@ webhooksRouter.post('/mercadopago', asyncHandler(async (req: Request, res: Respo
   if (type === 'subscription_authorized_payment' && data?.id) {
     // Um pagamento recorrente foi processado; sincroniza o status da assinatura.
     await handleAuthorizedPayment(data.id);
+  }
+
+  if (type === 'payment' && data?.id) {
+    // Pagamento avulso (Pix) aprovado; ativa a conta referenciada.
+    try { await applyPixPayment(await getMpPayment(String(data.id))); } catch { /* ignora */ }
   }
 
   // Sempre retorna 200 para o MP não reenviar a notificação.
