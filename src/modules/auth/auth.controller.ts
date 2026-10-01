@@ -20,7 +20,10 @@ function cookieOptions() {
 
 function sessionResponse(res: Response, session: authService.SessionResult) {
   res.cookie(env.REFRESH_COOKIE_NAME, session.refreshToken, { ...cookieOptions(), expires: session.refreshTokenExpiresAt });
-  return res.json({ accessToken: session.accessToken, user: session.user, company: session.company, role: session.role, subscription: session.subscription });
+  return res.json({
+    accessToken: session.accessToken, user: session.user, company: session.company, role: session.role, subscription: session.subscription,
+    ...(session.notice ? { notice: session.notice } : {}),
+  });
 }
 
 export const login = asyncHandler(async (req: Request, res: Response) => {
@@ -32,7 +35,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const googleLogin = asyncHandler(async (req: Request, res: Response) => {
-  const result = await authService.loginWithGoogle(req.body.accessToken);
+  const result = await authService.loginWithGoogle(req.body.accessToken, req.body.intent);
   if (result.status === 'select-company') {
     return res.json({ status: 'select-company', preAuthToken: result.preAuthToken, companies: result.companies });
   }
@@ -55,8 +58,11 @@ export const registerCompany = asyncHandler(async (req: Request, res: Response) 
 });
 
 export const registerEmployee = asyncHandler(async (req: Request, res: Response) => {
-  const { companyName } = await authService.registerEmployee(req.body);
-  return res.status(201).json({ message: `Pedido enviado para ${companyName}. Você poderá entrar assim que o administrador aprovar.` });
+  const { companyName, subscriptionActive } = await authService.registerEmployee(req.body);
+  const message = subscriptionActive
+    ? `Pedido enviado para ${companyName}. Você poderá entrar assim que o administrador aprovar.`
+    : `Pedido enviado para ${companyName}. O plano da empresa está vencido: você poderá entrar depois que o administrador renovar a assinatura e aprovar o seu acesso.`;
+  return res.status(201).json({ message });
 });
 
 // Consulta pública: um código errado não revela nada além de "não encontrado".
@@ -92,6 +98,11 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
 export const myCompanies = asyncHandler(async (req: Request, res: Response) => {
   const companies = await authService.listMyCompanies(req.auth!.userId, req.auth!.isSuperAdmin);
   return res.json({ companies });
+});
+
+// Perfil: todas as equipes do usuário com a situação do pedido de acesso.
+export const myMemberships = asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ memberships: await authService.listMyMemberships(req.auth!.userId) });
 });
 
 export const forgotPassword = asyncHandler(async (req: Request, res: Response) => {

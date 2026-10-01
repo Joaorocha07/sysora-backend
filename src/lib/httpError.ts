@@ -29,4 +29,12 @@ export class HttpError extends Error {
   static conflict(message: string) {
     return new HttpError(409, 'CONFLICT', message);
   }
+
+  // Funcionário de uma empresa com a assinatura vencida: não entra até o admin renovar.
+  static companyPlanExpired(companyName?: string, several = false) {
+    const message = several
+      ? 'O plano de todas as empresas em que você trabalha está vencido. Peça aos administradores para renovar a assinatura e liberar o seu acesso.'
+      : `O plano ${companyName ? `da empresa ${companyName}` : 'da empresa'} está vencido. Peça ao administrador para renovar a assinatura e liberar o seu acesso.`;
+    return new HttpError(403, 'COMPANY_SUBSCRIPTION_INACTIVE', message);
+  }
 }

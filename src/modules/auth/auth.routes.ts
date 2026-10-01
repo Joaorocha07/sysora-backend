@@ -33,5 +33,6 @@ authRouter.post('/reset-password', authRateLimiter, validate(resetPasswordSchema
 
 authRouter.get('/me', authenticate, controller.me);
 authRouter.get('/companies', authenticate, controller.myCompanies);
+authRouter.get('/memberships', authenticate, controller.myMemberships);
 authRouter.post('/switch-company', authenticate, validate(switchCompanySchema), controller.switchCompany);
 authRouter.post('/change-password', authenticate, validate(changePasswordSchema), controller.changePassword);

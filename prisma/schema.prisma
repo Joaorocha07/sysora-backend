@@ -19,6 +19,7 @@ enum Role {
 enum MembershipStatus {
   PENDING
   ACTIVE
+  REJECTED
 }
 
 enum AppointmentStatus {
@@ -155,6 +156,8 @@ model CompanyMembership {
   active    Boolean          @default(true)
   status    MembershipStatus @default(ACTIVE)
   createdAt DateTime         @default(now())
+  // Quando o admin aprovou ou recusou o pedido de acesso (nulo para quem foi adicionado direto).
+  decidedAt DateTime?
 
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)

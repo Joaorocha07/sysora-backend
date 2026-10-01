@@ -58,8 +58,12 @@ export async function createMember(companyId: string, input: { name: string; ema
   if (user?.isSuperAdmin) throw HttpError.conflict('Este e-mail pertence a um administrador master.');
   if (user) {
     const existing = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId: user.id, companyId } } });
-    // Já tinha pedido acesso pelo cadastro: cadastrar à mão equivale a aprovar.
-    if (existing?.status === MembershipStatus.PENDING) return approveMember(companyId, existing.id, input.role);
+    // Já tinha pedido acesso pelo cadastro: cadastrar à mão equivale a aprovar
+    // (inclusive um pedido recusado antes).
+    if (existing?.status === MembershipStatus.REJECTED) {
+      await prisma.companyMembership.update({ where: { id: existing.id }, data: { status: MembershipStatus.PENDING } });
+    }
+    if (existing && existing.status !== MembershipStatus.ACTIVE) return approveMember(companyId, existing.id, input.role);
     if (existing) throw HttpError.conflict('Este e-mail já faz parte da equipe.');
   } else {
     user = await prisma.user.create({
@@ -160,14 +164,15 @@ export async function approveMember(companyId: string, membershipId: string, rol
   await assertSeatAvailable(companyId);
   const membership = await prisma.companyMembership.update({
     where: { id: membershipId },
-    data: { status: MembershipStatus.ACTIVE, active: true, role },
+    data: { status: MembershipStatus.ACTIVE, active: true, role, decidedAt: new Date() },
     include: { user: true },
   });
   return toMember(membership);
 }
 
-// Recusar apaga o pedido: a pessoa pode pedir de novo, se foi engano.
+// Recusar fica registrado para o funcionário ver no perfil. Ele pode pedir de
+// novo pelo convite (se foi engano), e o admin pode adicioná-lo direto.
 export async function rejectMember(companyId: string, membershipId: string) {
   await findPending(companyId, membershipId);
-  await prisma.companyMembership.delete({ where: { id: membershipId } });
+  await prisma.companyMembership.update({ where: { id: membershipId }, data: { status: MembershipStatus.REJECTED, decidedAt: new Date() } });
 }

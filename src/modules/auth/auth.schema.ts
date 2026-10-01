@@ -46,6 +46,9 @@ export const registerEmployeeSchema = z.object({
 
 export const googleLoginSchema = z.object({
   accessToken: z.string().min(1, 'Token do Google ausente.'),
+  // 'join': veio do cadastro de funcionário (convite). Mesmo com conta existente,
+  // devolve o token de cadastro para pedir acesso à empresa do convite.
+  intent: z.enum(['login', 'join']).optional(),
 });
 
 export const forgotPasswordSchema = z.object({ email });

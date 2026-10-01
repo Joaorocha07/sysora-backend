@@ -1,5 +1,5 @@
 import { MembershipStatus, Plan, Role, SubscriptionStatus } from '@prisma/client';
-import { subscriptionSummary, trialEnd } from '../../lib/plans';
+import { isAccountActive, subscriptionSummary, trialEnd } from '../../lib/plans';
 import { normalizeInviteCode, uniqueInviteCode } from '../../lib/inviteCode';
 import { uniqueCompanySlug } from '../../lib/slug';
 import { prisma } from '../../lib/prisma';
@@ -35,9 +35,13 @@ export type SessionResult = {
   role: Role | null;
   // Assinatura da conta dona da empresa (nula no painel master).
   subscription: ReturnType<typeof subscriptionSummary> | null;
+  // Aviso para o usuário (ex.: foi levado para outra empresa porque o plano da atual venceu).
+  notice?: string;
 };
 
-export type CompanyChoice = SessionCompany & { role: Role };
+// available = falso quando o funcionário não pode entrar porque o plano da
+// empresa venceu (o admin sempre entra, em modo somente leitura).
+export type CompanyChoice = SessionCompany & { role: Role; available: boolean };
 
 async function resolveAccess(userId: string, companyId: string | null) {
   const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -57,6 +61,10 @@ async function resolveAccess(userId: string, companyId: string | null) {
   const membership = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId, companyId } } });
   if (!membership || !membership.active) throw HttpError.forbidden('Você não tem acesso a esta empresa.');
   if (membership.status === MembershipStatus.PENDING) throw HttpError.forbidden('Seu acesso a esta empresa ainda aguarda a aprovação do administrador.');
+  if (membership.status !== MembershipStatus.ACTIVE) throw HttpError.forbidden('Seu pedido de acesso a esta empresa foi recusado pelo administrador.');
+  // Assinatura vencida: o admin entra em modo somente leitura para regularizar;
+  // funcionários ficam de fora até a renovação.
+  if (membership.role !== Role.ADMIN && !isAccountActive(company.account)) throw HttpError.companyPlanExpired(company.name);
   return { user, company, role: membership.role };
 }
 
@@ -83,10 +91,16 @@ async function issueSession(userId: string, companyId: string | null): Promise<S
 async function activeCompanies(userId: string): Promise<CompanyChoice[]> {
   const memberships = await prisma.companyMembership.findMany({
     where: { userId, active: true, status: MembershipStatus.ACTIVE, company: { active: true } },
-    include: { company: true },
+    include: { company: { include: { account: true } } },
     orderBy: { company: { name: 'asc' } },
   });
-  return memberships.map((m) => ({ id: m.company.id, name: m.company.name, slug: m.company.slug, role: m.role }));
+  return memberships.map((m) => ({
+    id: m.company.id,
+    name: m.company.name,
+    slug: m.company.slug,
+    role: m.role,
+    available: m.role === Role.ADMIN || isAccountActive(m.company.account),
+  }));
 }
 
 export type LoginResult =
@@ -107,10 +121,15 @@ export type GoogleLoginResult =
 
 // Login com Google (Supabase Auth). E-mail já cadastrado entra como no login
 // por senha (e atualiza a foto); e-mail novo recebe um token para concluir o cadastro.
-export async function loginWithGoogle(accessToken: string): Promise<GoogleLoginResult> {
+// intent 'join' (cadastro de funcionário pelo convite): sempre devolve o token,
+// para quem já tem conta (ex.: trabalha em outra empresa) pedir acesso a mais uma.
+export async function loginWithGoogle(accessToken: string, intent: 'login' | 'join' = 'login'): Promise<GoogleLoginResult> {
   const profile = await verifyGoogleAccessToken(accessToken);
   const user = await prisma.user.findUnique({ where: { email: profile.email } });
-  if (!user) return { status: 'signup-required', signupToken: signGoogleSignupToken(profile), ...profile };
+  if (!user || (intent === 'join' && !user.isSuperAdmin)) {
+    if (user && !user.active) throw HttpError.unauthorized('Usuário inativo.');
+    return { status: 'signup-required', signupToken: signGoogleSignupToken(profile), ...profile, name: user?.name ?? profile.name };
+  }
   if (!user.active) throw HttpError.unauthorized('Usuário inativo.');
   await prisma.user.update({
     where: { id: user.id },
@@ -127,9 +146,16 @@ async function startLogin(user: { id: string; isSuperAdmin: boolean }): Promise<
   if (companies.length === 0) {
     const pending = await prisma.companyMembership.count({ where: { userId: user.id, status: MembershipStatus.PENDING } });
     if (pending) throw HttpError.forbidden('Seu cadastro foi recebido e aguarda a aprovação do administrador da empresa.');
+    const rejected = await prisma.companyMembership.count({ where: { userId: user.id, status: MembershipStatus.REJECTED } });
+    if (rejected) throw HttpError.forbidden('Seu pedido de acesso foi recusado pelo administrador da empresa. Fale com ele ou peça acesso de novo pelo convite.');
     throw HttpError.forbidden('Este usuário não tem acesso a nenhuma empresa ativa.');
   }
-  if (companies.length === 1) return { status: 'ok', session: await issueSession(user.id, companies[0].id) };
+
+  // Funcionário de várias empresas (de donos diferentes): entra se pelo menos
+  // uma estiver com o plano em dia; as vencidas aparecem bloqueadas na escolha.
+  const available = companies.filter((c) => c.available);
+  if (available.length === 0) throw HttpError.companyPlanExpired(companies[0].name, companies.length > 1);
+  if (available.length === 1) return { status: 'ok', session: await issueSession(user.id, available[0].id) };
 
   return { status: 'select-company', preAuthToken: signPreAuthToken({ sub: user.id }), companies };
 }
@@ -152,7 +178,28 @@ export async function switchCompany(userId: string, companyId: string | null): P
 export async function listMyCompanies(userId: string, isSuperAdmin: boolean): Promise<CompanyChoice[]> {
   if (!isSuperAdmin) return activeCompanies(userId);
   const companies = await prisma.company.findMany({ where: { active: true }, orderBy: { name: 'asc' } });
-  return companies.map((c) => ({ id: c.id, name: c.name, slug: c.slug, role: Role.ADMIN }));
+  return companies.map((c) => ({ id: c.id, name: c.name, slug: c.slug, role: Role.ADMIN, available: true }));
+}
+
+// Equipes do usuário para o perfil: aprovadas, pendentes e recusadas.
+// planActive avisa quando o plano da empresa venceu (o funcionário não entra).
+export async function listMyMemberships(userId: string) {
+  const memberships = await prisma.companyMembership.findMany({
+    where: { userId },
+    include: { company: { include: { account: true } } },
+    orderBy: [{ createdAt: 'desc' }],
+  });
+  return memberships.map((m) => ({
+    membershipId: m.id,
+    company: { id: m.company.id, name: m.company.name, active: m.company.active },
+    role: m.role,
+    status: m.status,
+    // Aprovado, mas desativado pelo admin.
+    active: m.active,
+    planActive: isAccountActive(m.company.account),
+    requestedAt: m.createdAt,
+    decidedAt: m.decidedAt,
+  }));
 }
 
 export async function refreshSession(rawRefreshToken: string): Promise<SessionResult> {
@@ -161,7 +208,17 @@ export async function refreshSession(rawRefreshToken: string): Promise<SessionRe
     throw HttpError.unauthorized('Sessão expirada. Faça login novamente.');
   }
 
-  const session = await issueSession(stored.userId, stored.companyId);
+  let session: SessionResult;
+  try {
+    session = await issueSession(stored.userId, stored.companyId);
+  } catch (err) {
+    // O plano da empresa atual venceu: se o funcionário trabalha em outra com o
+    // plano em dia, a sessão continua nela; senão, sai com o aviso.
+    if (!(err instanceof HttpError) || err.code !== 'COMPANY_SUBSCRIPTION_INACTIVE') throw err;
+    const fallback = (await activeCompanies(stored.userId)).find((c) => c.available);
+    if (!fallback) throw err;
+    session = { ...(await issueSession(stored.userId, fallback.id)), notice: `${err.message} Você foi levado para ${fallback.name}.` };
+  }
   await prisma.refreshToken.update({
     where: { id: stored.id },
     data: { revokedAt: new Date(), replacedByTokenHash: hashToken(session.refreshToken) },
@@ -285,14 +342,16 @@ export async function registerCompany(input: Credentials & { companyName: string
 
 // Nome da empresa de um código de convite (para o funcionário conferir antes de enviar).
 export async function lookupInvite(code: string) {
-  const company = await prisma.company.findUnique({ where: { inviteCode: normalizeInviteCode(code) }, select: { name: true, active: true } });
+  const company = await prisma.company.findUnique({ where: { inviteCode: normalizeInviteCode(code) }, include: { account: true } });
   if (!company || !company.active) throw HttpError.notFound('Código não encontrado. Confira com o administrador da empresa.');
-  return { name: company.name };
+  return { name: company.name, subscriptionActive: isAccountActive(company.account) };
 }
 
 // Funcionário pede acesso com o código da empresa; entra só depois que o admin aprovar.
 export async function registerEmployee(input: Credentials & { inviteCode: string; name: string; phone?: string | null }) {
-  const company = await prisma.company.findUnique({ where: { inviteCode: normalizeInviteCode(input.inviteCode) } });
+  // Com o plano vencido o cadastro continua aceito; o acesso só libera depois
+  // da aprovação e da renovação (ver resolveAccess).
+  const company = await prisma.company.findUnique({ where: { inviteCode: normalizeInviteCode(input.inviteCode) }, include: { account: true } });
   if (!company || !company.active) throw HttpError.notFound('Código não encontrado. Confira com o administrador da empresa.');
 
   const { email, password, google } = resolveCredentials(input);
@@ -301,10 +360,20 @@ export async function registerEmployee(input: Credentials & { inviteCode: string
     // Conta já existe (ex.: trabalha em outra empresa): confirma que é o dono
     // dela. Pelo Google o e-mail já foi confirmado.
     if (user.isSuperAdmin || (!google && !(await comparePassword(password, user.passwordHash)))) {
-      throw HttpError.conflict('Este e-mail já tem uma conta no Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
+      throw HttpError.conflict(user.googleLinkedAt
+        ? 'Este e-mail já tem uma conta no Sysora criada com o Google. Use o botão "Cadastrar com Google" para pedir acesso a esta empresa.'
+        : 'Este e-mail já tem uma conta no Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
     }
     const existing = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId: user.id, companyId: company.id } } });
     if (existing?.status === MembershipStatus.PENDING) throw HttpError.conflict('Você já pediu acesso a esta empresa. Aguarde a aprovação do administrador.');
+    if (existing?.status === MembershipStatus.REJECTED) {
+      // Pedido recusado antes: vale pedir de novo (volta para a fila do admin).
+      await prisma.companyMembership.update({
+        where: { id: existing.id },
+        data: { status: MembershipStatus.PENDING, role: Role.EMPLOYEE, createdAt: new Date(), decidedAt: null },
+      });
+      return { companyName: company.name, subscriptionActive: isAccountActive(company.account) };
+    }
     if (existing) throw HttpError.conflict('Você já faz parte desta empresa. É só entrar.');
     if (google) {
       await prisma.user.update({
@@ -321,5 +390,5 @@ export async function registerEmployee(input: Credentials & { inviteCode: string
   await prisma.companyMembership.create({
     data: { userId: user.id, companyId: company.id, role: Role.EMPLOYEE, status: MembershipStatus.PENDING },
   });
-  return { companyName: company.name };
+  return { companyName: company.name, subscriptionActive: isAccountActive(company.account) };
 }
