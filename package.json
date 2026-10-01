@@ -17,6 +17,7 @@
     "db:local": "node scripts/local-db.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "@prisma/client": "^5.20.0",
     "@supabase/supabase-js": "^2.117.2",
     "baileys": "^7.0.0-rc14",

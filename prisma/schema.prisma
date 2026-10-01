@@ -61,15 +61,15 @@ enum SubscriptionStatus {
 // Assinatura de um cliente do SaaS. O plano é da conta, não da empresa: no
 // Avançado o mesmo dono tem até duas empresas, cada uma com o seu WhatsApp.
 model Account {
-  id                String             @id @default(uuid())
-  name              String
-  plan              Plan               @default(INICIAL)
-  status            SubscriptionStatus @default(TRIAL)
-  trialEndsAt       DateTime?
-  paidUntil         DateTime?
-  mpSubscriptionId  String?
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  id               String             @id @default(uuid())
+  name             String
+  plan             Plan               @default(INICIAL)
+  status           SubscriptionStatus @default(TRIAL)
+  trialEndsAt      DateTime?
+  paidUntil        DateTime?
+  mpSubscriptionId String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   companies Company[]
 
@@ -82,28 +82,52 @@ model PlatformSettings {
   id                  Int      @id @default(1)
   // Cadastro de empresas pelo site (/cadastro). false = só o admin master cria empresas.
   publicSignupEnabled Boolean  @default(true)
+  // Créditos colocados na conta da Anthropic (centavos de dólar), para o saldo estimado da IA no painel master.
+  aiCreditCents       Int      @default(0)
   updatedAt           DateTime @updatedAt
 
   @@map("platform_settings")
 }
 
+// Consumo da IA (Claude) por chamada: tokens e custo estimado pela tabela de
+// preços (lib/aiPricing.ts). Alimenta o painel master de gastos com IA.
+model AiUsage {
+  id               String   @id @default(uuid())
+  companyId        String?
+  feature          String
+  model            String
+  inputTokens      Int
+  outputTokens     Int
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  // Custo em milionésimos de dólar (US$ 0,10 = 100000).
+  costMicros       Int
+  createdAt        DateTime @default(now())
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([companyId])
+  @@map("ai_usage")
+}
+
 // Uma empresa (tenant). Todo dado de negócio pertence a uma Company, e cada
 // Company tem a sua própria conexão de WhatsApp.
 model Company {
-  id           String   @id @default(uuid())
-  accountId    String
-  name         String
-  slug         String   @unique
-  document     String?
-  phone        String?
-  email        String?
+  id         String   @id @default(uuid())
+  accountId  String
+  name       String
+  slug       String   @unique
+  document   String?
+  phone      String?
+  email      String?
   // Código que o funcionário informa no cadastro para pedir acesso à empresa.
-  inviteCode   String   @unique
+  inviteCode String   @unique
   // Empresa criada pelo cadastro público do site (e não pelo admin master).
-  selfSignup   Boolean  @default(false)
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  selfSignup Boolean  @default(false)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   memberships      CompanyMembership[]
   clients          Client[]
@@ -115,6 +139,7 @@ model Company {
   whatsappSessions WhatsAppSession[]
   whatsappAuth     WhatsAppAuth[]
   account          Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  aiUsage          AiUsage[]
 
   @@index([accountId])
   @@map("companies")
@@ -123,22 +148,22 @@ model Company {
 // Conta de usuário. O e-mail é único no sistema; o acesso a cada empresa é
 // controlado por CompanyMembership.
 model User {
-  id           String   @id @default(uuid())
-  name         String
-  email        String   @unique
-  phone        String?
-  passwordHash String
-  active       Boolean  @default(true)
+  id             String    @id @default(uuid())
+  name           String
+  email          String    @unique
+  phone          String?
+  passwordHash   String
+  active         Boolean   @default(true)
   // Admin master: gerencia todas as empresas do SaaS e pode entrar em
   // qualquer uma com permissão de administrador.
-  isSuperAdmin Boolean  @default(false)
+  isSuperAdmin   Boolean   @default(false)
   // Foto do perfil do Google, atualizada a cada login com Google.
   avatarUrl      String?
   // Primeira vez que entrou com Google (nulo = só usa e-mail e senha).
   googleLinkedAt DateTime?
   lastLoginAt    DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   memberships   CompanyMembership[]
   refreshTokens RefreshToken[]
@@ -149,7 +174,7 @@ model User {
 
 // Vínculo do usuário com uma empresa + papel dentro dela.
 model CompanyMembership {
-  id        String   @id @default(uuid())
+  id        String           @id @default(uuid())
   userId    String
   companyId String
   role      Role             @default(EMPLOYEE)
@@ -201,7 +226,7 @@ model PasswordResetToken {
 // Cliente final da empresa. Criado à mão pela equipe ou automaticamente pelo
 // bot quando alguém manda mensagem no WhatsApp.
 model Client {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   companyId     String
   name          String
   phone         String
@@ -210,12 +235,12 @@ model Client {
   notes         String?
   // wa_id do WhatsApp (ex.: 5531999999999), destino das mensagens do sistema.
   whatsappId    String?
-  source        Source   @default(STAFF)
+  source        Source    @default(STAFF)
   lastMessageAt DateTime?
   // Mensagens do cliente ainda não vistas pela equipe (caixa de conversas).
-  unreadCount   Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  unreadCount   Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
   appointments Appointment[]
@@ -251,24 +276,24 @@ model Service {
 // Horário marcado. date/startTime/endTime ficam no fuso da empresa (TZ do
 // servidor) como texto: AAAA-MM-DD e HH:mm.
 model Appointment {
-  id                     String            @id @default(uuid())
-  companyId              String
-  clientId               String
-  staffId                String?
-  date                   String
-  startTime              String
-  endTime                String
-  status                 AppointmentStatus @default(SCHEDULED)
-  source                 Source            @default(STAFF)
-  notes                  String?
-  totalCents             Int               @default(0)
+  id                 String            @id @default(uuid())
+  companyId          String
+  clientId           String
+  staffId            String?
+  date               String
+  startTime          String
+  endTime            String
+  status             AppointmentStatus @default(SCHEDULED)
+  source             Source            @default(STAFF)
+  notes              String?
+  totalCents         Int               @default(0)
   // Lembretes do bot (véspera e pouco antes) e resposta do cliente.
-  reminderSentAt         DateTime?
-  hourReminderSentAt     DateTime?
-  confirmedAt            DateTime?
-  canceledAt             DateTime?
-  createdAt              DateTime          @default(now())
-  updatedAt              DateTime          @updatedAt
+  reminderSentAt     DateTime?
+  hourReminderSentAt DateTime?
+  confirmedAt        DateTime?
+  canceledAt         DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
   company Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
   client  Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -336,25 +361,28 @@ model CompanySettings {
   whatsappPhone     String?
 
   // Chatbot. As mensagens aceitam {nome}, {empresa}, {servico}, {data} e {hora}.
-  botEnabled             Boolean @default(true)
-  autoCreateClient       Boolean @default(true)
-  askName                Boolean @default(true)
-  greetingMessage        String  @default("Olá, {nome}! Bem-vindo(a) à {empresa}.")
-  handoffMessage         String  @default("Certo! Uma pessoa da nossa equipe vai te responder por aqui em instantes.")
-  confirmationMessage    String  @default("Agendado! {servico} no dia {data} às {hora}. Até lá, {nome}!")
-  reminderEnabled        Boolean @default(true)
-  reminderTime           String  @default("10:00")
-  reminderMessage        String  @default("Oi, {nome}! Passando para lembrar do seu horário amanhã: {servico} no dia {data} às {hora}.")
-  hourReminderEnabled    Boolean @default(true)
-  hourReminderMinutes    Int     @default(60)
-  hourReminderMessage    String  @default("Oi, {nome}! Seu horário é hoje às {hora}: {servico}. Te esperamos!")
+  botEnabled          Boolean @default(true)
+  autoCreateClient    Boolean @default(true)
+  askName             Boolean @default(true)
+  greetingMessage     String  @default("Olá, {nome}! Bem-vindo(a) à {empresa}.")
+  handoffMessage      String  @default("Certo! Uma pessoa da nossa equipe vai te responder por aqui em instantes.")
+  confirmationMessage String  @default("Agendado! {servico} no dia {data} às {hora}. Até lá, {nome}!")
+  reminderEnabled     Boolean @default(true)
+  reminderTime        String  @default("10:00")
+  reminderMessage     String  @default("Oi, {nome}! Passando para lembrar do seu horário amanhã: {servico} no dia {data} às {hora}.")
+  hourReminderEnabled Boolean @default(true)
+  hourReminderMinutes Int     @default(60)
+  hourReminderMessage String  @default("Oi, {nome}! Seu horário é hoje às {hora}: {servico}. Te esperamos!")
   // Quando a equipe responde, o bot fica em silêncio com o cliente até
   // humanTimeoutMinutes sem mensagem da equipe.
-  pauseOnStaffReply      Boolean @default(true)
-  humanTimeoutMinutes    Int     @default(30)
-  humanEndMessage        String  @default("Seu atendimento com a nossa equipe foi encerrado. Obrigado pelo contato!")
+  pauseOnStaffReply   Boolean @default(true)
+  humanTimeoutMinutes Int     @default(30)
+  humanEndMessage     String  @default("Seu atendimento com a nossa equipe foi encerrado. Obrigado pelo contato!")
   // Fluxo do bot montado na aba "Fluxo do bot" (whatsapp.flow.ts). Nulo = menu padrão.
-  botFlow                Json?
+  botFlow             Json?
+  // Uso da Sora (IA que monta o fluxo) no mês corrente, para o limite mensal.
+  soraMonth           String?
+  soraCount           Int     @default(0)
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

@@ -53,7 +53,11 @@ adminRouter.get('/stats', asyncHandler(async (_req: Request, res: Response) => {
 }));
 
 // Configurações da plataforma (ex.: cadastro público de empresas).
-const platformSettingsSchema = z.object({ publicSignupEnabled: z.boolean().optional() });
+const platformSettingsSchema = z.object({
+  publicSignupEnabled: z.boolean().optional(),
+  // Créditos colocados na Anthropic (centavos de dólar), para o saldo estimado da IA.
+  aiCreditCents: z.number().int().min(0).max(100_000_000).optional(),
+});
 
 adminRouter.get('/settings', asyncHandler(async (_req: Request, res: Response) => {
   return res.json({ settings: await getPlatformSettings() });
@@ -61,6 +65,11 @@ adminRouter.get('/settings', asyncHandler(async (_req: Request, res: Response) =
 
 adminRouter.patch('/settings', validate(platformSettingsSchema), asyncHandler(async (req: Request, res: Response) => {
   return res.json({ settings: await updatePlatformSettings(req.body) });
+}));
+
+// Gastos com IA (Sora): créditos, gasto estimado, saldo, por empresa e últimas chamadas.
+adminRouter.get('/ai-usage', asyncHandler(async (_req: Request, res: Response) => {
+  return res.json(await adminService.aiUsageSummary());
 }));
 
 adminRouter.get('/users',asyncHandler(async (_req: Request, res: Response) => {

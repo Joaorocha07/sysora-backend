@@ -6,6 +6,8 @@ import { uniqueCompanySlug } from '../../lib/slug';
 import { uniqueInviteCode } from '../../lib/inviteCode';
 import { PLANS, addMonth, isAccountActive, subscriptionSummary, trialEnd } from '../../lib/plans';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
+import { env } from '../../config/env';
+import { getPlatformSettings } from '../../lib/platformSettings';
 import * as whatsappConnection from '../whatsapp/whatsapp.connection';
 
 // Painel do admin master: empresas, contas (assinaturas) e o administrador
@@ -204,4 +206,56 @@ export async function deleteCompany(companyId: string) {
     await prisma.account.delete({ where: { id: company.accountId } });
   }
   invalidateSubscriptionCache([companyId]);
+}
+
+// ============ Gastos com IA (Sora) ============
+
+const usd = (micros: number) => micros / 1_000_000;
+
+// Resumo para o painel master: créditos colocados na Anthropic, gasto estimado
+// (pelos tokens de cada chamada) e saldo. O valor oficial fica no console da Anthropic.
+export async function aiUsageSummary() {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const [settings, total, month, byCompany, recent] = await Promise.all([
+    getPlatformSettings(),
+    prisma.aiUsage.aggregate({ _sum: { costMicros: true }, _count: true }),
+    prisma.aiUsage.aggregate({ where: { createdAt: { gte: monthStart } }, _sum: { costMicros: true, inputTokens: true, outputTokens: true }, _count: true }),
+    prisma.aiUsage.groupBy({ by: ['companyId'], where: { createdAt: { gte: monthStart } }, _sum: { costMicros: true }, _count: true }),
+    prisma.aiUsage.findMany({ orderBy: { createdAt: 'desc' }, take: 15, include: { company: { select: { name: true } } } }),
+  ]);
+  const names = await prisma.company.findMany({
+    where: { id: { in: byCompany.map((c) => c.companyId).filter((id): id is string => Boolean(id)) } },
+    select: { id: true, name: true },
+  });
+  const spentUsd = usd(total._sum.costMicros ?? 0);
+  const creditUsd = settings.aiCreditCents / 100;
+  return {
+    configured: Boolean(env.ANTHROPIC_API_KEY),
+    model: env.SORA_MODEL,
+    monthlyLimitPerCompany: env.SORA_MONTHLY_LIMIT,
+    creditUsd,
+    spentUsd,
+    remainingUsd: creditUsd - spentUsd,
+    calls: total._count,
+    month: {
+      spentUsd: usd(month._sum.costMicros ?? 0),
+      calls: month._count,
+      inputTokens: month._sum.inputTokens ?? 0,
+      outputTokens: month._sum.outputTokens ?? 0,
+    },
+    byCompany: byCompany
+      .map((c) => ({ companyId: c.companyId, name: names.find((n) => n.id === c.companyId)?.name ?? 'Empresa excluída', calls: c._count, spentUsd: usd(c._sum.costMicros ?? 0) }))
+      .sort((a, b) => b.spentUsd - a.spentUsd),
+    recent: recent.map((r) => ({
+      id: r.id,
+      company: r.company?.name ?? 'Empresa excluída',
+      feature: r.feature,
+      model: r.model,
+      inputTokens: r.inputTokens + r.cacheReadTokens + r.cacheWriteTokens,
+      outputTokens: r.outputTokens,
+      costUsd: usd(r.costMicros),
+      createdAt: r.createdAt,
+    })),
+  };
 }

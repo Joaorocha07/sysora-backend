@@ -40,6 +40,13 @@ const schema = z.object({
   MP_PLAN_INICIAL_ID: z.string().optional(),
   MP_PLAN_AVANCADO_ID: z.string().optional(),
 
+  // Sora: assistente de IA (Claude) que monta o fluxo do bot. Sem a chave, o
+  // botão da Sora avisa que não está configurada e o editor manual segue normal.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  SORA_MODEL: z.string().default('claude-opus-5-5'),
+  // Pedidos à Sora por empresa por mês (cada mensagem no chat conta 1).
+  SORA_MONTHLY_LIMIT: z.coerce.number().int().positive().default(50),
+
   // E-mail (recuperação de senha). Sem SMTP_HOST o link aparece no terminal.
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().default(587),
