@@ -20,10 +20,7 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
   const monthStart = `${today.slice(0, 8)}01`;
   const weekAgo = addDays(now, -6);
 
-  const [
-    clients, newClientsMonth, todayAppointments, monthAppointments, monthCompleted, botAppointmentsMonth,
-    unread, settings, weekAppointments, servicesCount, pendingUsers,
-  ] = await Promise.all([
+  const [clients, newClientsMonth, todayAppointments, monthAppointments, monthCompleted] = await Promise.all([
     prisma.client.count({ where: { companyId } }),
     prisma.client.count({ where: { companyId, createdAt: { gte: new Date(`${monthStart}T00:00:00`) } } }),
     prisma.appointment.findMany({
@@ -33,6 +30,9 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     }),
     prisma.appointment.count({ where: { companyId, date: { gte: monthStart }, status: { not: AppointmentStatus.CANCELED } } }),
     prisma.appointment.aggregate({ where: { companyId, date: { gte: monthStart }, status: AppointmentStatus.COMPLETED }, _sum: { totalCents: true }, _count: true }),
+  ]);
+
+  const [botAppointmentsMonth, unread, settings, weekAppointments, servicesCount, pendingUsers, upcoming] = await Promise.all([
     prisma.appointment.count({ where: { companyId, date: { gte: monthStart }, source: Source.BOT } }),
     prisma.client.aggregate({ where: { companyId }, _sum: { unreadCount: true } }),
     prisma.companySettings.findUnique({ where: { companyId }, select: { whatsappConnected: true, whatsappPhone: true, botEnabled: true } }),
@@ -43,14 +43,13 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     }),
     prisma.service.count({ where: { companyId, active: true } }),
     prisma.companyMembership.count({ where: { companyId, status: 'PENDING' } }),
+    prisma.appointment.findMany({
+      where: { companyId, date: { gt: today }, status: { in: ACTIVE_STATUSES } },
+      include: appointmentInclude,
+      orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
+      take: 6,
+    }),
   ]);
-
-  const upcoming = await prisma.appointment.findMany({
-    where: { companyId, date: { gt: today }, status: { in: ACTIVE_STATUSES } },
-    include: appointmentInclude,
-    orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
-    take: 6,
-  });
 
   const byDay = new Map(weekAppointments.map((d) => [d.date, d._count]));
   const week = Array.from({ length: 7 }, (_, i) => {
