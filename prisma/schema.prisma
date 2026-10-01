@@ -353,6 +353,8 @@ model CompanySettings {
   pauseOnStaffReply      Boolean @default(true)
   humanTimeoutMinutes    Int     @default(30)
   humanEndMessage        String  @default("Seu atendimento com a nossa equipe foi encerrado. Obrigado pelo contato!")
+  // Fluxo do bot montado na aba "Fluxo do bot" (whatsapp.flow.ts). Nulo = menu padrão.
+  botFlow                Json?
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

@@ -5,14 +5,16 @@ import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
 import * as appointmentsService from '../appointments/appointments.service';
 import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availability';
+import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 
 // Chatbot do WhatsApp. Toda mensagem recebida: encontra (ou cria) o cliente
 // pelo número, salva a mensagem na conversa dele e, se o bot estiver ligado,
-// avança o atendimento:
-//   MENU -> 1) agendar: [ASK_NAME] -> ASK_SERVICE -> ASK_DATE -> ASK_TIME -> agendado
-//        -> 2) meus agendamentos: MANAGE (confirmar / remarcar / cancelar)
-//        -> 3) serviços e valores
-//        -> 4) falar com a equipe: HUMAN (bot em silêncio enquanto a equipe atende)
+// avança o atendimento. Os menus seguem o fluxo montado pela empresa
+// (whatsapp.flow.ts); as funções prontas que ele pode usar são:
+//   agendar: [ASK_NAME] -> ASK_SERVICE -> ASK_DATE -> ASK_TIME -> agendado
+//   meus agendamentos: MANAGE (confirmar / remarcar / cancelar)
+//   serviços e valores
+//   falar com a equipe: HUMAN (bot em silêncio enquanto a equipe atende)
 // A equipe responder (pelo Sysora ou pelo celular) também abre HUMAN. Se a
 // equipe passar humanTimeoutMinutes sem escrever, o bot encerra o atendimento.
 // O lembrete da véspera (whatsapp.jobs.ts) abre a etapa CONFIRM:
@@ -24,6 +26,8 @@ type SessionData = {
   // MENU depois de concluir algo: o cliente pode escolher uma opção direto;
   // outra mensagem recebe as boas-vindas, como numa conversa nova.
   idle?: boolean;
+  // MENU: submenu do fluxo em que o cliente está (vazio = menu principal).
+  nodeId?: string;
   serviceIds?: string[];
   // Opções oferecidas na última mensagem, para o cliente responder pelo número.
   days?: string[];
@@ -75,16 +79,8 @@ const MEDIA_LABELS: Record<string, string> = {
 const DAYS_OFFERED = 6;
 const PLACEHOLDER_PREFIX = 'Cliente WhatsApp';
 
-type MenuOption = 'agendar' | 'meus' | 'servicos' | 'equipe';
-const MENU: MenuOption[] = ['agendar', 'meus', 'servicos', 'equipe'];
-const MENU_LABELS: Record<MenuOption, string> = {
-  agendar: 'Agendar um horário',
-  meus: 'Meus agendamentos',
-  servicos: 'Serviços e valores',
-  equipe: 'Falar com a equipe',
-};
-// Palavras que o cliente pode digitar em vez do número.
-const MENU_KEYWORDS: [MenuOption, RegExp][] = [
+// Palavras que o cliente pode digitar em vez do número (opções com função pronta).
+const MENU_KEYWORDS: [FlowAction, RegExp][] = [
   ['meus', /remarc|cancel|desmarc|meu horario|meus horarios|meu agendamento|meus agendamentos|confirm/],
   ['agendar', /agend|marcar|horario/],
   ['servicos', /servico|preco|valor|quanto|tabela/],
@@ -153,12 +149,82 @@ function pickFromList<T>(answer: string, list: T[] | undefined): T | undefined {
   return list[Number(answer) - 1];
 }
 
-function pickMenuOption(answer: string): MenuOption | undefined {
-  return pickFromList(answer, MENU) ?? MENU_KEYWORDS.find(([, pattern]) => pattern.test(answer))?.[0];
+function pickMenuOption(answer: string, menu: FlowNode): FlowNode | undefined {
+  const options = menu.options ?? [];
+  const byNumber = pickFromList(answer, options);
+  if (byNumber) return byNumber;
+  const byLabel = options.find((o) => normalize(o.label) === answer);
+  if (byLabel) return byLabel;
+  const action = MENU_KEYWORDS.find(([a, pattern]) => pattern.test(answer) && options.some((o) => o.action === a))?.[0];
+  return options.find((o) => o.type === 'action' && o.action === action);
 }
 
-function mainMenu(): string {
-  return blocks('Como posso te ajudar? Responda com o número:', numbered(MENU.map((o) => MENU_LABELS[o])));
+const flowOf = (ctx: BotContext) => getFlow(ctx.settings);
+
+// Texto do menu: pergunta e opções numeradas (submenus também oferecem o 0).
+function menuText(ctx: BotContext, menu: FlowNode = flowOf(ctx)): string {
+  const vars = { empresa: ctx.companyName };
+  return blocks(
+    fillTemplate(menu.prompt || 'Responda com o número:', vars),
+    numbered((menu.options ?? []).map((o) => fillTemplate(o.label, vars))),
+    menu.id !== flowOf(ctx).id && BACK_OPTION,
+  );
+}
+
+const mainMenu = (ctx: BotContext) => menuText(ctx);
+
+// Envia as partes num balão só (juntas) ou uma mensagem para cada.
+async function sayParts(ctx: BotContext, parts: (string | undefined | false | null)[], together: boolean) {
+  const list = parts.filter((p): p is string => Boolean(p));
+  if (together) {
+    if (list.length) await say(ctx, blocks(...list));
+    return;
+  }
+  for (const part of list) await say(ctx, part);
+}
+
+// Cliente escolheu uma etapa do fluxo (ou começou a conversa, na raiz).
+async function runNode(ctx: BotContext, node: FlowNode, parent: FlowNode | null, data: SessionData, name: string) {
+  const root = flowOf(ctx);
+  const messages = node.messages.map((m) => fillTemplate(m, { nome: name, empresa: ctx.companyName }));
+  const base: SessionData = { askName: data.askName };
+  const menuId = (menu: FlowNode) => (menu.id === root.id ? undefined : menu.id);
+
+  if (node.type === 'menu') {
+    await setSession(ctx, 'MENU', { ...base, nodeId: menuId(node) });
+    await sayParts(ctx, [...messages, menuText(ctx, node)], node.together);
+    return;
+  }
+  if (node.type === 'message') {
+    const target = node.next === 'parent' && parent ? parent : root;
+    await setSession(ctx, 'MENU', { ...base, nodeId: menuId(target) });
+    await sayParts(ctx, [...messages, menuText(ctx, target)], node.together);
+    return;
+  }
+  if (node.type === 'end') {
+    await setSession(ctx, 'MENU', { ...base, idle: true });
+    await sayParts(ctx, messages, node.together);
+    return;
+  }
+
+  // Função pronta: as mensagens da etapa vêm antes (no mesmo balão, se juntas).
+  if (!node.together) await sayParts(ctx, messages, false);
+  const prefix = node.together ? blocks(...messages) : '';
+  const intro = prefix || (messages.length ? '' : 'Ótimo!');
+  if (node.action === 'agendar') {
+    if (data.askName) {
+      await setSession(ctx, 'ASK_NAME', base);
+      await say(ctx, blocks(intro, 'Para fazer seu cadastro, qual é o seu nome?', BACK_OPTION));
+    } else {
+      await offerServices(ctx, base, intro);
+    }
+  } else if (node.action === 'meus') {
+    await showAppointments(ctx, base, prefix);
+  } else if (node.action === 'servicos') {
+    await showCatalog(ctx, base, prefix);
+  } else {
+    await handOff(ctx, prefix);
+  }
 }
 
 export function parseBrDate(text: string, now = new Date()): string | null {
@@ -294,11 +360,9 @@ async function activeServices(companyId: string) {
   return prisma.service.findMany({ where: { companyId, active: true }, orderBy: [{ position: 'asc' }, { name: 'asc' }] });
 }
 
-// Começo de conversa: boas-vindas e menu em duas mensagens.
+// Começo de conversa: boas-vindas e menu principal do fluxo.
 async function sendWelcome(ctx: BotContext, name: string, data: SessionData) {
-  await setSession(ctx, 'MENU', data);
-  await say(ctx, fillTemplate(ctx.settings.greetingMessage, { nome: name, empresa: ctx.companyName }));
-  await say(ctx, mainMenu());
+  await runNode(ctx, flowOf(ctx), null, { askName: data.askName }, name);
 }
 
 // Terminou algo: continua ouvindo o menu, para o cliente poder mandar outra opção.
@@ -483,7 +547,7 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
   // (também tira o cliente da espera pela equipe).
   if (text && BACK_WORDS.has(normalize(text))) {
     await setSession(ctx, 'MENU', { askName: (session.data as SessionData)?.askName });
-    await say(ctx, mainMenu());
+    await say(ctx, mainMenu(ctx));
     return;
   }
 
@@ -499,26 +563,13 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
   const answer = normalize(text);
 
   if (step === 'MENU') {
-    const option = pickMenuOption(answer);
-    if (option === 'agendar') {
-      if (data.askName) {
-        await setSession(ctx, 'ASK_NAME', data);
-        await say(ctx, blocks('Ótimo! Para fazer seu cadastro, qual é o seu nome?', BACK_OPTION));
-      } else {
-        await offerServices(ctx, data, 'Ótimo!');
-      }
-      return;
-    }
-    if (option === 'meus') {
-      await showAppointments(ctx, data);
-      return;
-    }
-    if (option === 'servicos') {
-      await showCatalog(ctx, data);
-      return;
-    }
-    if (option === 'equipe') {
-      await handOff(ctx);
+    const root = flowOf(ctx);
+    // Submenu removido do fluxo enquanto o cliente estava nele: usa o principal.
+    const found = findNode(root, data.nodeId);
+    const menu = found?.node.type === 'menu' ? found.node : root;
+    const option = pickMenuOption(answer, menu);
+    if (option) {
+      await runNode(ctx, option, menu, data, name);
       return;
     }
     if (data.idle) {
@@ -526,7 +577,7 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       await sendWelcome(ctx, name, { askName: data.askName });
       return;
     }
-    await say(ctx, blocks('Não entendi.', mainMenu()));
+    await say(ctx, blocks('Não entendi.', menuText(ctx, menu)));
     return;
   }
 
@@ -647,18 +698,19 @@ async function durationOf(ctx: BotContext, data: SessionData) {
   return services.reduce((sum, s) => sum + s.durationMinutes, 0) || ctx.settings.slotMinutes;
 }
 
-async function showCatalog(ctx: BotContext, data: SessionData) {
+async function showCatalog(ctx: BotContext, data: SessionData, prefix?: string) {
   const services = await activeServices(ctx.companyId);
   await setSession(ctx, 'MENU', { askName: data.askName, idle: true });
   if (!services.length) {
-    await say(ctx, blocks('Ainda não temos serviços cadastrados por aqui.', mainMenu()));
+    await say(ctx, blocks(prefix, 'Ainda não temos serviços cadastrados por aqui.', mainMenu(ctx)));
     return;
   }
   const list = services.map((s) => {
     const price = s.priceCents ? money(s.priceCents) : 'valor sob consulta';
     return `• ${s.name}: ${price} (${durationLabel(s.durationMinutes)})${s.description ? `\n   ${s.description}` : ''}`;
   }).join('\n');
-  await say(ctx, blocks('Nossos serviços:', list, 'Para agendar, responda 1.', mainMenu()));
+  const bookOption = (flowOf(ctx).options ?? []).findIndex((o) => o.action === 'agendar');
+  await say(ctx, blocks(prefix, 'Nossos serviços:', list, bookOption >= 0 && `Para agendar, responda ${bookOption + 1}.`, mainMenu(ctx)));
 }
 
 async function offerServices(ctx: BotContext, data: SessionData, prefix: string) {
@@ -668,7 +720,7 @@ async function offerServices(ctx: BotContext, data: SessionData, prefix: string)
     return;
   }
   if (services.length === 1) {
-    await offerDays(ctx, { ...data, serviceIds: [services[0].id] }, `${prefix} Vamos agendar ${services[0].name}.`);
+    await offerDays(ctx, { ...data, serviceIds: [services[0].id] }, `${prefix} Vamos agendar ${services[0].name}.`.trim());
     return;
   }
   await setSession(ctx, 'ASK_SERVICE', data);
@@ -761,14 +813,14 @@ async function awaitingConfirmation(companyId: string, clientId: string) {
 }
 
 // "Meus agendamentos": próximo horário (com ações) e os demais marcados.
-async function showAppointments(ctx: BotContext, data: SessionData) {
+async function showAppointments(ctx: BotContext, data: SessionData, prefix?: string) {
   const next = ctx.clientId ? await appointmentsService.nextAppointmentOf(ctx.companyId, ctx.clientId) : null;
   if (!next) {
     await setSession(ctx, 'MENU', { askName: data.askName });
-    await say(ctx, blocks('Você não tem nenhum horário marcado no momento.', mainMenu()));
+    await say(ctx, blocks(prefix, 'Você não tem nenhum horário marcado no momento.', mainMenu(ctx)));
     return;
   }
-  await showAppointment(ctx, next);
+  await showAppointment(ctx, next, prefix);
 }
 
 async function showAppointment(ctx: BotContext, appointment: FullAppointment, prefix?: string) {

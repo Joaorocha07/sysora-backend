@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
 import { HttpError } from '../../lib/httpError';
@@ -7,7 +7,11 @@ import { prisma } from '../../lib/prisma';
 import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
+import * as settingsService from '../settings/settings.service';
 import * as connection from './whatsapp.connection';
+import { defaultFlow, flowSchema, getFlow } from './whatsapp.flow';
+
+const saveFlowSchema = z.object({ flow: flowSchema });
 
 const sendTestSchema = z.object({
   to: z.string().trim().min(8, 'Informe um número de WhatsApp válido.'),
@@ -48,4 +52,27 @@ whatsappRouter.post('/test', requireRole(Role.ADMIN), validate(sendTestSchema), 
   if (!jid) throw HttpError.badRequest('Esse número não tem WhatsApp. Confira o DDI e o DDD (ex.: 5531999999999).');
   await connection.sendText(companyId, jid, 'Mensagem de teste do Sysora. Sua conexão com o WhatsApp está funcionando!');
   return res.json({ message: 'Mensagem de teste enviada.' });
+}));
+
+// Fluxo do bot (aba "Fluxo do bot"). Sem fluxo salvo, devolve o padrão.
+whatsappRouter.get('/flow', asyncHandler(async (req: Request, res: Response) => {
+  const settings = await settingsService.getSettings(companyOf(req));
+  return res.json({ flow: getFlow(settings), custom: Boolean(settings.botFlow) });
+}));
+
+whatsappRouter.put('/flow', requireRole(Role.ADMIN), validate(saveFlowSchema), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  await settingsService.getSettings(companyId);
+  await prisma.companySettings.update({ where: { companyId }, data: { botFlow: req.body.flow } });
+  // Conversas no meio do fluxo antigo podem apontar para etapas que não existem mais.
+  await prisma.whatsAppSession.deleteMany({ where: { companyId, step: 'MENU' } });
+  return res.json({ flow: req.body.flow, custom: true });
+}));
+
+whatsappRouter.delete('/flow', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  await settingsService.getSettings(companyId);
+  const settings = await prisma.companySettings.update({ where: { companyId }, data: { botFlow: Prisma.DbNull } });
+  await prisma.whatsAppSession.deleteMany({ where: { companyId, step: 'MENU' } });
+  return res.json({ flow: defaultFlow(settings), custom: false });
 }));
