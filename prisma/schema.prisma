@@ -60,14 +60,15 @@ enum SubscriptionStatus {
 // Assinatura de um cliente do SaaS. O plano é da conta, não da empresa: no
 // Avançado o mesmo dono tem até duas empresas, cada uma com o seu WhatsApp.
 model Account {
-  id          String             @id @default(uuid())
-  name        String
-  plan        Plan               @default(INICIAL)
-  status      SubscriptionStatus @default(TRIAL)
-  trialEndsAt DateTime?
-  paidUntil   DateTime?
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id                String             @id @default(uuid())
+  name              String
+  plan              Plan               @default(INICIAL)
+  status            SubscriptionStatus @default(TRIAL)
+  trialEndsAt       DateTime?
+  paidUntil         DateTime?
+  mpSubscriptionId  String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
   companies Company[]
 

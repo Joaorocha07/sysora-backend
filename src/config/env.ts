@@ -35,6 +35,11 @@ const schema = z.object({
   SUPABASE_URL: z.string().url('SUPABASE_URL inválida').optional().or(z.literal('').transform(() => undefined)),
   SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
 
+  // Mercado Pago (assinaturas recorrentes).
+  MP_ACCESS_TOKEN: z.string().optional(),
+  MP_PLAN_INICIAL_ID: z.string().optional(),
+  MP_PLAN_AVANCADO_ID: z.string().optional(),
+
   // E-mail (recuperação de senha). Sem SMTP_HOST o link aparece no terminal.
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().default(587),

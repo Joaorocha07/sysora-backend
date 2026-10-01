@@ -16,6 +16,8 @@ import { dashboardRouter } from './modules/dashboard/dashboard.routes';
 import { servicesRouter } from './modules/services/services.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
 import { usersRouter } from './modules/users/users.routes';
+import { subscriptionsRouter } from './modules/subscriptions/subscriptions.routes';
+import { webhooksRouter } from './modules/webhooks/webhooks.routes';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes';
 
 export const app = express();
@@ -48,6 +50,8 @@ app.use('/api/appointments', appointmentsRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/subscriptions', subscriptionsRouter);
+app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
 
 app.use(notFoundHandler);
