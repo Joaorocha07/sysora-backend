@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { MercadoPagoConfig, Payment, PreApproval, PreApprovalPlan } from 'mercadopago';
+import { Invoice, MercadoPagoConfig, Payment, PreApproval, PreApprovalPlan } from 'mercadopago';
 import { Plan } from '@prisma/client';
 import { env } from '../../config/env';
 import { addMonth, PLANS } from '../../lib/plans';
@@ -68,6 +68,66 @@ export async function cancelMpSubscription(mpSubscriptionId: string) {
 export async function getMpSubscription(mpSubscriptionId: string) {
   const client = getClient();
   return new PreApproval(client).get({ id: mpSubscriptionId });
+}
+
+// ---------- Cobranças da assinatura (authorized payments) ----------
+
+export type ChargeResult = 'approved' | 'rejected' | 'pending';
+type MpInvoice = Awaited<ReturnType<typeof getMpInvoice>>;
+
+export async function getMpInvoice(invoiceId: string) {
+  const client = getClient();
+  return new Invoice(client).get({ id: invoiceId });
+}
+
+function chargeResult(invoice: MpInvoice): ChargeResult {
+  if (invoice.payment?.status === 'approved') return 'approved';
+  if (invoice.payment?.status === 'rejected' || invoice.status === 'cancelled') return 'rejected';
+  return 'pending';
+}
+
+// A primeira cobrança de uma assinatura nova é processada pelo MP alguns segundos
+// depois da criação. Espera até ~12s; se não sair, o webhook conclui depois.
+export async function waitFirstCharge(mpSubscriptionId: string): Promise<ChargeResult> {
+  const client = getClient();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const { results } = await new Invoice(client).search({ options: { preapproval_id: mpSubscriptionId } });
+    const invoices = results ?? [];
+    if (invoices.some((i) => chargeResult(i) === 'approved')) return 'approved';
+    if (invoices.length && invoices.every((i) => chargeResult(i) === 'rejected')) return 'rejected';
+  }
+  return 'pending';
+}
+
+// Aplica na conta o resultado de uma cobrança recorrente. Idempotente: paidUntil
+// vem da data da cobrança e nunca é reduzido, então reprocessar não muda nada.
+export async function applyInvoice(invoice: MpInvoice) {
+  if (!invoice.preapproval_id) return;
+  const account = await prisma.account.findFirst({ where: { mpSubscriptionId: invoice.preapproval_id } });
+  if (!account) return;
+
+  const result = chargeResult(invoice);
+  if (result === 'approved') {
+    const chargedAt = new Date(invoice.debit_date ?? invoice.last_modified ?? invoice.date_created ?? Date.now());
+    const paidUntil = addMonth(chargedAt);
+    await prisma.account.update({
+      where: { id: account.id },
+      data: {
+        status: 'ACTIVE',
+        paidUntil: account.paidUntil && account.paidUntil > paidUntil ? account.paidUntil : paidUntil,
+      },
+    });
+  } else if (result === 'rejected' && account.status === 'ACTIVE') {
+    // Renovação recusada: o MP tenta de novo nos próximos dias; a conta segue
+    // ativa até paidUntil + carência.
+    await prisma.account.update({ where: { id: account.id }, data: { status: 'PAST_DUE' } });
+  } else {
+    return;
+  }
+
+  const companies = await prisma.company.findMany({ where: { accountId: account.id }, select: { id: true } });
+  invalidateSubscriptionCache(companies.map((c) => c.id));
 }
 
 // ---------- Pix (pagamento avulso de 1 mês) ----------

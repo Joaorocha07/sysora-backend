@@ -1,9 +1,10 @@
 import { Request, Response, Router } from 'express';
 import { asyncHandler } from '../../lib/asyncHandler';
-import { addMonth } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
-import { applyPixPayment, getMpPayment, getMpSubscription } from '../subscriptions/subscriptions.service';
+import {
+  applyInvoice, applyPixPayment, getMpInvoice, getMpPayment, getMpSubscription,
+} from '../subscriptions/subscriptions.service';
 
 export const webhooksRouter = Router();
 
@@ -17,8 +18,8 @@ webhooksRouter.post('/mercadopago', asyncHandler(async (req: Request, res: Respo
   }
 
   if (type === 'subscription_authorized_payment' && data?.id) {
-    // Um pagamento recorrente foi processado; sincroniza o status da assinatura.
-    await handleAuthorizedPayment(data.id);
+    // Uma cobrança da assinatura foi processada (aprovada ou recusada).
+    await applyInvoice(await getMpInvoice(String(data.id)));
   }
 
   if (type === 'payment' && data?.id) {
@@ -30,50 +31,22 @@ webhooksRouter.post('/mercadopago', asyncHandler(async (req: Request, res: Respo
   return res.sendStatus(200);
 }));
 
+// Mudança de estado da assinatura. Não mexe em paidUntil: só cobranças aprovadas
+// (subscription_authorized_payment) estendem o acesso.
 async function handleSubscriptionEvent(mpSubscriptionId: string) {
   const account = await prisma.account.findFirst({ where: { mpSubscriptionId } });
   if (!account) return;
 
   const mpSub = await getMpSubscription(mpSubscriptionId);
 
-  let status: 'ACTIVE' | 'PAST_DUE' | 'CANCELED';
   if (mpSub.status === 'cancelled') {
-    status = 'CANCELED';
-  } else if (mpSub.status === 'paused') {
-    status = 'PAST_DUE';
+    await prisma.account.update({ where: { id: account.id }, data: { status: 'CANCELED', mpSubscriptionId: null } });
+  } else if (mpSub.status === 'paused' && account.status === 'ACTIVE') {
+    await prisma.account.update({ where: { id: account.id }, data: { status: 'PAST_DUE' } });
   } else {
-    status = 'ACTIVE';
+    return;
   }
-
-  await prisma.account.update({
-    where: { id: account.id },
-    data: {
-      status,
-      paidUntil: status === 'ACTIVE' ? addMonth(new Date()) : undefined,
-      mpSubscriptionId: status === 'CANCELED' ? null : undefined,
-    },
-  });
 
   const companies = await prisma.company.findMany({ where: { accountId: account.id }, select: { id: true } });
   invalidateSubscriptionCache(companies.map((c) => c.id));
-}
-
-async function handleAuthorizedPayment(_id: string) {
-  // Um pagamento recorrente foi aprovado; sincroniza paidUntil de todas as contas ativas no MP.
-  const accounts = await prisma.account.findMany({
-    where: { mpSubscriptionId: { not: null }, status: { in: ['ACTIVE', 'PAST_DUE'] } },
-    select: { id: true, mpSubscriptionId: true },
-  });
-
-  for (const account of accounts) {
-    try {
-      const mpSub = await getMpSubscription(account.mpSubscriptionId!);
-      if (mpSub.status === 'authorized') {
-        await prisma.account.update({
-          where: { id: account.id },
-          data: { status: 'ACTIVE', paidUntil: addMonth(new Date()) },
-        });
-      }
-    } catch { /* continua para a próxima conta */ }
-  }
 }

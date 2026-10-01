@@ -10,7 +10,7 @@ import { validate } from '../../middlewares/validate.middleware';
 import { checkoutSchema, pixSchema } from './subscriptions.schema';
 import {
   applyPixPayment, cancelMpSubscription, createMpSubscription, createPixPayment, getMpPayment, getMpPlanId, getMpSubscription,
-  parsePixReference,
+  parsePixReference, waitFirstCharge,
 } from './subscriptions.service';
 
 async function accountOfCompany(companyId: string) {
@@ -31,25 +31,36 @@ subscriptionsRouter.post('/checkout', validate(checkoutSchema), asyncHandler(asy
   const { cardTokenId, payerEmail, plan } = req.body;
   const account = await accountOfCompany(companyOf(req));
 
+  // Cria a assinatura nova antes de mexer na antiga: se o cartão for recusado,
+  // o cliente continua com o que já tinha.
+  const mpPlanId = await getMpPlanId(plan);
+  const mpSub = await createMpSubscription(mpPlanId, cardTokenId, payerEmail);
+
+  const charge = await waitFirstCharge(mpSub.id!);
+  if (charge === 'rejected') {
+    try { await cancelMpSubscription(mpSub.id!); } catch { /* ignora */ }
+    throw HttpError.badRequest('Cartão recusado pelo banco. Verifique os dados ou use outro cartão.');
+  }
+
   if (account.mpSubscriptionId) {
     try { await cancelMpSubscription(account.mpSubscriptionId); } catch { /* ignora erros de cancelamento anterior */ }
   }
 
-  const mpPlanId = await getMpPlanId(plan);
-  const mpSub = await createMpSubscription(mpPlanId, cardTokenId, payerEmail);
-
+  // Só ativa com a cobrança aprovada. Se ainda estiver em análise, o webhook
+  // (subscription_authorized_payment) ativa a conta quando o MP confirmar.
+  const now = new Date();
+  const paidUntil = account.paidUntil && account.paidUntil > addMonth(now) ? account.paidUntil : addMonth(now);
   const updated = await prisma.account.update({
     where: { id: account.id },
     data: {
       plan,
       mpSubscriptionId: mpSub.id,
-      status: 'ACTIVE',
-      paidUntil: addMonth(new Date()),
+      ...(charge === 'approved' ? { status: 'ACTIVE' as const, paidUntil } : {}),
     },
   });
 
   await invalidateCompanies(account.id);
-  return res.json({ subscription: subscriptionSummary(updated) });
+  return res.json({ subscription: subscriptionSummary(updated), pending: charge === 'pending' });
 }));
 
 // POST /api/subscriptions/cancel — cancela a assinatura corrente.
