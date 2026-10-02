@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import * as z from 'zod/v4';
 import { env } from '../../config/env';
+import { requireAiPlan } from '../../lib/aiAccess';
 import { recordAiUsage } from '../../lib/aiUsage';
 import { HttpError } from '../../lib/httpError';
 import { prisma } from '../../lib/prisma';
@@ -31,6 +32,7 @@ export async function improveDescription(
   companyId: string,
   input: { name: string; description?: string | null; priceCents?: number; durationMinutes?: number },
 ): Promise<string> {
+  await requireAiPlan(companyId);
   if (!env.ANTHROPIC_API_KEY) throw HttpError.badRequest('A IA ainda não está configurada neste servidor.');
   const usage = await botAiUsage(companyId);
   if (usage.used >= usage.limit) throw HttpError.forbidden(`A IA já foi usada ${usage.limit} vezes este mês. O limite renova no dia 1º.`);

@@ -1,6 +1,6 @@
 import { AppointmentStatus, CompanySettings, MessageSender, Service, Source } from '@prisma/client';
 import { env } from '../../config/env';
-import { isAccountActive } from '../../lib/plans';
+import { hasAi, isAccountActive } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
@@ -60,6 +60,8 @@ type BotContext = {
   saveContact?: (name: string) => Promise<void>;
   settings: CompanySettings;
   clientId: string | null;
+  // Plano com IA (Avançado pago): texto livre e áudio. Sem IA, só números e palavras-chave.
+  ai?: boolean;
 };
 export type IncomingWhatsAppMessage = {
   companyId: string;
@@ -470,6 +472,7 @@ export async function handleIncomingMessage(message: IncomingWhatsAppMessage): P
     saveContact: message.saveContact,
     settings: company.settings,
     clientId: null,
+    ai: hasAi(company.account),
   };
   await withContactLock(ctx.companyId, ctx.waId, () => processMessage(ctx, message));
 }
@@ -525,7 +528,7 @@ export async function sendHourReminder(settings: CompanySettings, companyName: s
 
 // Áudio -> texto, quando a transcrição está ligada e configurada no servidor.
 async function audioText(ctx: BotContext, audio: IncomingWhatsAppMessage['audio']): Promise<string | null> {
-  if (!audio || !ctx.settings.transcribeAudio || !transcriptionEnabled() || audio.seconds > env.TRANSCRIBE_MAX_SECONDS) return null;
+  if (!audio || !ctx.ai || !ctx.settings.transcribeAudio || !transcriptionEnabled() || audio.seconds > env.TRANSCRIBE_MAX_SECONDS) return null;
   try {
     return await transcribeAudio(ctx.companyId, await audio.load(), audio.mimetype, audio.seconds);
   } catch (err) {
@@ -736,7 +739,7 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
 
 // Chama a IA (se ligada) com a pergunta e as opções que o cliente acabou de ver.
 async function aiUnderstand(ctx: BotContext, question: string, options: string[], text: string, services?: Service[]): Promise<Understanding | null> {
-  if (!env.ANTHROPIC_API_KEY || !ctx.settings.botAiEnabled) return null;
+  if (!ctx.ai || !env.ANTHROPIC_API_KEY || !ctx.settings.botAiEnabled) return null;
   return understand({
     companyId: ctx.companyId,
     companyName: ctx.companyName,
@@ -773,6 +776,7 @@ function optionFromAi(u: Understanding, menu: FlowNode): FlowNode | undefined {
 async function tryAiMenu(ctx: BotContext, menu: FlowNode, data: SessionData, text: string, name: string, greet: boolean): Promise<boolean> {
   const root = flowOf(ctx);
   const vars = { empresa: ctx.companyName };
+  if (!ctx.ai) return false;
   const services = env.ANTHROPIC_API_KEY && ctx.settings.botAiEnabled ? await activeServices(ctx.companyId) : [];
   const u = await aiUnderstand(ctx, menuText(ctx, menu), (menu.options ?? []).map((o) => fillTemplate(o.label, vars)), text, services);
   if (!u) return false;

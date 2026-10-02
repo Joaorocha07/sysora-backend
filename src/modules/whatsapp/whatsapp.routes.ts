@@ -7,6 +7,7 @@ import { prisma } from '../../lib/prisma';
 import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
+import { companyHasAi, requireAiPlan } from '../../lib/aiAccess';
 import { transcriptionEnabled } from '../../lib/transcription';
 import * as settingsService from '../settings/settings.service';
 import * as ai from './whatsapp.ai';
@@ -107,13 +108,15 @@ whatsappRouter.post('/flow/sora', requireRole(Role.ADMIN), validate(soraSchema),
 
 // IA do atendimento: disponível no servidor, uso do mês e transcrição de áudio.
 whatsappRouter.get('/ai', asyncHandler(async (req: Request, res: Response) => {
-  return res.json({ ...(await ai.botAiUsage(companyOf(req))), transcription: transcriptionEnabled() });
+  const companyId = companyOf(req);
+  return res.json({ ...(await ai.botAiUsage(companyId)), transcription: transcriptionEnabled(), allowed: await companyHasAi(companyId) });
 }));
 
 // "Testar conversa" do editor: o que a IA entenderia de uma mensagem escrita
 // no menu atual (conta no limite do mês, como no WhatsApp).
 whatsappRouter.post('/flow/understand', requireRole(Role.ADMIN), validate(understandSchema), asyncHandler(async (req: Request, res: Response) => {
   const companyId = companyOf(req);
+  await requireAiPlan(companyId);
   const flow = req.body.flow;
   const found = findNode(flow, req.body.nodeId);
   const menu = found?.node.type === 'menu' ? found.node : flow;

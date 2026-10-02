@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import * as z from 'zod/v4';
 import { env } from '../../config/env';
+import { companyHasAi, requireAiPlan } from '../../lib/aiAccess';
 import { recordAiUsage } from '../../lib/aiUsage';
 import { HttpError } from '../../lib/httpError';
 import { prisma } from '../../lib/prisma';
@@ -41,7 +42,7 @@ const soraOutput = z.object({
 });
 
 export type SoraMessage = { role: 'user' | 'assistant'; text: string };
-export type SoraResult = { reply: string; flow: FlowNode | null; usage: { used: number; limit: number } };
+export type SoraResult = { reply: string; flow: FlowNode | null; usage: { used: number; limit: number; allowed: boolean } };
 
 let client: Anthropic | null = null;
 function anthropic(): Anthropic {
@@ -55,7 +56,7 @@ const monthKey = (d = new Date()) => d.toISOString().slice(0, 7);
 export async function soraUsage(companyId: string) {
   const settings = await prisma.companySettings.findUnique({ where: { companyId }, select: { soraMonth: true, soraCount: true } });
   const used = settings?.soraMonth === monthKey() ? settings.soraCount : 0;
-  return { used, limit: env.SORA_MONTHLY_LIMIT, enabled: Boolean(env.ANTHROPIC_API_KEY) };
+  return { used, limit: env.SORA_MONTHLY_LIMIT, enabled: Boolean(env.ANTHROPIC_API_KEY), allowed: await companyHasAi(companyId) };
 }
 
 async function countUse(companyId: string) {
@@ -163,6 +164,7 @@ Como responder:
 - O dono revisa o fluxo no editor antes de salvar; diga isso só na primeira vez que montar um fluxo.`;
 
 export async function askSora(companyId: string, history: SoraMessage[], currentFlow: FlowNode): Promise<SoraResult> {
+  await requireAiPlan(companyId);
   const api = anthropic();
   const usage = await soraUsage(companyId);
   if (usage.used >= usage.limit) {
