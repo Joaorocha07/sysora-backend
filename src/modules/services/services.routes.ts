@@ -7,6 +7,7 @@ import { prisma } from '../../lib/prisma';
 import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
+import { improveDescription } from './services.ai';
 
 // Catálogo de serviços da empresa. O bot oferece os serviços ativos, na
 // ordem de `position`.
@@ -31,6 +32,18 @@ servicesRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     include: { _count: { select: { appointments: true } } },
   });
   return res.json({ services });
+}));
+
+// "Melhorar com IA" no formulário do serviço (ainda não salvo): devolve o texto sugerido.
+const improveSchema = z.object({
+  name: z.string().trim().min(1, 'Informe o nome do serviço antes de usar a IA.').max(60),
+  description: z.string().trim().max(300).nullish(),
+  priceCents: z.number().int().min(0).max(100_000_000).optional(),
+  durationMinutes: z.number().int().min(1).max(600).optional(),
+});
+
+servicesRouter.post('/improve-description', requireRole(Role.ADMIN), validate(improveSchema), asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ description: await improveDescription(companyOf(req), req.body) });
 }));
 
 servicesRouter.post('/', requireRole(Role.ADMIN), validate(serviceSchema), asyncHandler(async (req: Request, res: Response) => {

@@ -61,7 +61,7 @@ export async function botAiUsage(companyId: string) {
   return { used, limit: env.BOT_AI_MONTHLY_LIMIT, available: Boolean(env.ANTHROPIC_API_KEY) };
 }
 
-async function countUse(companyId: string) {
+export async function countUse(companyId: string) {
   const month = monthKey();
   const settings = await prisma.companySettings.findUniqueOrThrow({ where: { companyId }, select: { botAiMonth: true } });
   await prisma.companySettings.update({
