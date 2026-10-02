@@ -1,10 +1,13 @@
 import { AppointmentStatus, CompanySettings, MessageSender, Service, Source } from '@prisma/client';
+import { env } from '../../config/env';
 import { isAccountActive } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
+import { transcribeAudio, transcriptionEnabled } from '../../lib/transcription';
 import * as appointmentsService from '../appointments/appointments.service';
 import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availability';
+import { Understanding, understand } from './whatsapp.ai';
 import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 
 // Chatbot do WhatsApp. Toda mensagem recebida: encontra (ou cria) o cliente
@@ -19,6 +22,11 @@ import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 // equipe passar humanTimeoutMinutes sem escrever, o bot encerra o atendimento.
 // O lembrete da véspera (whatsapp.jobs.ts) abre a etapa CONFIRM:
 //   1) confirmar  2) remarcar -> ASK_DATE  3) cancelar
+// Quando a resposta não é um número nem uma palavra conhecida, a IA do
+// atendimento (whatsapp.ai.ts) interpreta o texto: escolhe a opção, os
+// serviços, o dia e o horário ("quero cortar o cabelo sexta às 15h" agenda
+// direto se o horário estiver livre) ou responde uma pergunta com os dados da
+// empresa. Áudios são transcritos (lib/transcription.ts) e seguem igual.
 
 type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'HUMAN';
 type SessionData = {
@@ -36,6 +44,8 @@ type SessionData = {
   manage?: ManageAction[];
   // Agendamento sendo remarcado (MANAGE/CONFIRM -> ASK_DATE).
   appointmentId?: string;
+  // Dia/horário que o cliente já adiantou ("amanhã às 14h"), usados assim que o serviço for escolhido.
+  wish?: { date?: string; time?: string };
   // HUMAN: última mensagem da equipe e quando o cliente pediu atendimento (ISO).
   staffAt?: string;
   requestedAt?: string;
@@ -57,6 +67,8 @@ export type IncomingWhatsAppMessage = {
   messageId?: string;
   text: string | null;
   mediaType?: string;
+  // Áudio recebido: baixado só se a transcrição estiver ligada.
+  audio?: { seconds: number; mimetype: string; load: () => Promise<Buffer> };
   profileName?: string;
   send: (text: string) => Promise<void>;
   // Salva o cliente nos contatos do WhatsApp da empresa.
@@ -93,6 +105,12 @@ const MANAGE_LABELS: Record<ManageAction, string> = {
   remarcar: 'Remarcar',
   cancelar: 'Cancelar',
 };
+
+const MANAGE_CODES: Record<ManageAction, string> = { confirmar: '1', remarcar: '2', cancelar: '3' };
+const CONFIRM_ACTIONS: ManageAction[] = ['confirmar', 'remarcar', 'cancelar'];
+
+// Cumprimentos e agradecimentos: não vale gastar IA (vão para as boas-vindas).
+const SMALL_TALK = /^((oi+e?|ola+|opa|eai|e ai|hey|bom dia|boa tarde|boa noite|tudo bem|tudo bom|td bem|obrigad[oa]|obg|brigad[oa]|valeu|vlw|ok|okay|blz|beleza|tchau|ate mais|ate logo|[\p{Extended_Pictographic}])[\s!.,?]*)+$/u;
 
 export const CONFIRM_OPTIONS = `Responda com o número:\n\n1) Confirmar\n2) Remarcar\n3) Cancelar\n\n${BACK_OPTION}`;
 const CONFIRM_WORDS = new Set(['1', 'sim', 's', 'confirmo', 'confirmar', 'confirmado', 'confirmada', 'ok', 'certo', 'tudo certo', 'combinado', '👍']);
@@ -212,11 +230,13 @@ async function runNode(ctx: BotContext, node: FlowNode, parent: FlowNode | null,
   const prefix = node.together ? blocks(...messages) : '';
   const intro = prefix || (messages.length ? '' : 'Ótimo!');
   if (node.action === 'agendar') {
+    // Serviço, dia e horário que o cliente já disse (IA) seguem para o agendamento.
+    const booking: SessionData = { ...base, serviceIds: data.serviceIds, wish: data.wish };
     if (data.askName) {
-      await setSession(ctx, 'ASK_NAME', base);
+      await setSession(ctx, 'ASK_NAME', booking);
       await say(ctx, blocks(intro, 'Para fazer seu cadastro, qual é o seu nome?', BACK_OPTION));
     } else {
-      await offerServices(ctx, base, intro);
+      await offerServices(ctx, booking, intro);
     }
   } else if (node.action === 'meus') {
     await showAppointments(ctx, base, prefix);
@@ -503,9 +523,21 @@ export async function sendHourReminder(settings: CompanySettings, companyName: s
   if (askConfirmation) await setSession(ctx, 'CONFIRM', { appointmentId: appointment.id });
 }
 
+// Áudio -> texto, quando a transcrição está ligada e configurada no servidor.
+async function audioText(ctx: BotContext, audio: IncomingWhatsAppMessage['audio']): Promise<string | null> {
+  if (!audio || !ctx.settings.transcribeAudio || !transcriptionEnabled() || audio.seconds > env.TRANSCRIBE_MAX_SECONDS) return null;
+  try {
+    return await transcribeAudio(ctx.companyId, await audio.load(), audio.mimetype, audio.seconds);
+  } catch (err) {
+    console.error('Não foi possível transcrever o áudio:', err);
+    return null;
+  }
+}
+
 async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage) {
   const { settings } = ctx;
-  const { text } = message;
+  const transcript = message.text ? null : await audioText(ctx, message.audio);
+  const text = message.text ?? transcript;
   const profileName = cleanName(message.profileName) || undefined;
 
   let client = await findClientByWhatsApp(ctx.companyId, ctx.waId);
@@ -522,7 +554,8 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
     if (profileName) await saveContact({ ...ctx, clientId: client.id }, profileName);
   }
   ctx.clientId = client?.id ?? null;
-  await logMessage(ctx.companyId, ctx.clientId, text ?? `[${MEDIA_LABELS[message.mediaType ?? ''] ?? 'mensagem'}]`, MessageSender.CLIENT);
+  const logged = transcript ? `🎤 Áudio: "${transcript}"` : text ?? `[${MEDIA_LABELS[message.mediaType ?? ''] ?? 'mensagem'}]`;
+  await logMessage(ctx.companyId, ctx.clientId, logged, MessageSender.CLIENT);
 
   let session = await prisma.whatsAppSession.findUnique({ where: { companyId_phone: { companyId: ctx.companyId, phone: ctx.waId } } });
   if (session && (sessionExpired(session, settings) || (text && RESET_WORDS.has(normalize(text))))) {
@@ -539,6 +572,8 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
     if (text && pending && await answerConfirmation(ctx, pending, normalize(text))) return;
 
     const askName = settings.askName && (client ? isPlaceholderName(client.name) : !profileName);
+    // Já chegou dizendo o que quer ("queria agendar um corte"): boas-vindas e vai direto.
+    if (text && !SMALL_TALK.test(normalize(text)) && await tryAiMenu(ctx, flowOf(ctx), { askName }, text, name, true)) return;
     await sendWelcome(ctx, name, { askName });
     return;
   }
@@ -553,7 +588,9 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
 
   if (session.step === 'HUMAN') return;
   if (!text) {
-    await say(ctx, 'Por enquanto só consigo entender mensagens de texto. Pode digitar sua resposta?');
+    await say(ctx, message.audio
+      ? 'Não consegui ouvir seu áudio. Pode escrever sua resposta?'
+      : 'Por enquanto só consigo entender mensagens de texto. Pode digitar sua resposta?');
     return;
   }
   await advance(ctx, session.step as BotStep, (session.data as SessionData) ?? {}, text, name);
@@ -572,6 +609,7 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       await runNode(ctx, option, menu, data, name);
       return;
     }
+    if (!SMALL_TALK.test(answer) && await tryAiMenu(ctx, menu, data, text, name, false)) return;
     if (data.idle) {
       // Conversa anterior concluída ("obrigado", "oi"...): recomeça com as boas-vindas.
       await sendWelcome(ctx, name, { askName: data.askName });
@@ -595,33 +633,42 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
 
   if (step === 'ASK_SERVICE') {
     const services = await activeServices(ctx.companyId);
-    const chosen = pickServices(text, services);
+    let chosen = pickServices(text, services);
+    let { wish } = data;
+    if (!chosen) {
+      const u = await aiUnderstand(ctx, serviceQuestion(services), services.map((s) => s.name), text, services);
+      const picked = u?.services.length ? u.services : u?.option ? [u.option] : [];
+      if (picked.length) {
+        chosen = picked.map((n) => services[n - 1]);
+        wish = wishOf(u) ?? wish;
+      } else if (u?.answer) {
+        await say(ctx, blocks(u.answer, serviceQuestion(services)));
+        return;
+      }
+    }
     if (!chosen) {
       await say(ctx, blocks('Não encontrei esse serviço.', serviceQuestion(services)));
       return;
     }
     const duration = chosen.reduce((sum, s) => sum + s.durationMinutes, 0);
     const total = chosen.length > 1 ? ` Os ${chosen.length} serviços levam cerca de ${durationLabel(duration)} no total.` : '';
-    await offerDays(ctx, { ...data, serviceIds: chosen.map((s) => s.id) }, `Perfeito, ${chosen.map((s) => s.name).join(' + ')}!${total}`);
+    await scheduleWish(ctx, { ...data, wish, serviceIds: chosen.map((s) => s.id) }, `Perfeito, ${chosen.map((s) => s.name).join(' + ')}!${total}`);
     return;
   }
 
   if (step === 'ASK_DATE') {
     const date = pickFromList(answer, data.days) ?? parseBrDate(text);
-    if (!date) {
-      await offerDays(ctx, data, 'Não entendi o dia (ou ele já passou).');
+    if (date) {
+      await scheduleWish(ctx, { ...data, wish: { date } });
       return;
     }
-    if (!ctx.settings.workDays.includes(weekdayOf(date))) {
-      await offerDays(ctx, data, `Não atendemos ${WEEKDAYS[weekdayOf(date)]}.`);
+    const u = await aiUnderstand(ctx, 'Qual dia fica bom para você?', (data.days ?? []).map((d) => dayLabel(d)), text);
+    const picked = (u?.option ? data.days?.[u.option - 1] : undefined) ?? u?.date;
+    if (picked) {
+      await scheduleWish(ctx, { ...data, wish: { date: picked, time: u?.time ?? undefined } });
       return;
     }
-    const times = await freeTimes(ctx.companyId, ctx.settings, date, await durationOf(ctx, data), data.appointmentId);
-    if (!times.length) {
-      await offerDays(ctx, data, `Não temos mais horários livres ${onDay(date)}.`);
-      return;
-    }
-    await offerTimes(ctx, { ...data, date }, times);
+    await offerDays(ctx, data, u?.answer ?? 'Não entendi o dia (ou ele já passou).');
     return;
   }
 
@@ -630,10 +677,21 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       await offerServices(ctx, data, 'Vamos recomeçar o agendamento.');
       return;
     }
-    const time = pickFromList(answer, data.times) ?? parseTime(text);
+    let time = pickFromList(answer, data.times) ?? parseTime(text);
+    let note = 'Não entendi o horário.';
+    if (!time) {
+      const u = await aiUnderstand(ctx, `Horários livres ${onDay(data.date)}. Qual horário?`, data.times ?? [], text);
+      // "Tem na sexta?": muda o dia.
+      if (u?.date && u.date !== data.date) {
+        await scheduleWish(ctx, { ...data, wish: { date: u.date, time: u.time ?? undefined } });
+        return;
+      }
+      time = (u?.option ? data.times?.[u.option - 1] : undefined) ?? u?.time ?? null;
+      if (u?.answer) note = u.answer;
+    }
     if (!time) {
       const times = await freeTimes(ctx.companyId, ctx.settings, data.date, await durationOf(ctx, data), data.appointmentId);
-      await offerTimes(ctx, data, times, 'Não entendi o horário.');
+      await offerTimes(ctx, data, times, note);
       return;
     }
     await book(ctx, data, time);
@@ -646,11 +704,16 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       await showAppointments(ctx, {});
       return;
     }
-    const action = pickFromList(answer, data.manage) ?? manageActionFromText(answer);
-    if (action === 'confirmar') await answerConfirmation(ctx, appointment, '1');
-    else if (action === 'remarcar') await answerConfirmation(ctx, appointment, '2');
-    else if (action === 'cancelar') await answerConfirmation(ctx, appointment, '3');
-    else await showAppointment(ctx, appointment, 'Não entendi.');
+    let action = pickFromList(answer, data.manage) ?? manageActionFromText(answer);
+    let wish: SessionData['wish'];
+    let note = 'Não entendi.';
+    if (!action) {
+      const u = await aiUnderstand(ctx, `Seu próximo horário: ${servicesOf(appointment)} ${onDay(appointment.date)} às ${appointment.startTime}.`, (data.manage ?? []).map((a) => MANAGE_LABELS[a]), text);
+      action = manageActionOf(u, data.manage ?? []);
+      wish = wishOf(u);
+      if (u?.answer) note = u.answer;
+    }
+    if (!action || !(await answerConfirmation(ctx, appointment, MANAGE_CODES[action], wish))) await showAppointment(ctx, appointment, note);
     return;
   }
 
@@ -661,8 +724,108 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       await sendWelcome(ctx, name, {});
       return;
     }
-    if (!(await answerConfirmation(ctx, appointment, answer))) await say(ctx, blocks('Não entendi.', CONFIRM_OPTIONS));
+    if (await answerConfirmation(ctx, appointment, answer)) return;
+    const u = await aiUnderstand(ctx, `Lembrete do horário: ${servicesOf(appointment)} ${onDay(appointment.date)} às ${appointment.startTime}.`, CONFIRM_ACTIONS.map((a) => MANAGE_LABELS[a]), text);
+    const action = manageActionOf(u, CONFIRM_ACTIONS);
+    if (action && await answerConfirmation(ctx, appointment, MANAGE_CODES[action], wishOf(u))) return;
+    await say(ctx, blocks(u?.answer ?? 'Não entendi.', CONFIRM_OPTIONS));
   }
+}
+
+// ---------- IA do atendimento ----------
+
+// Chama a IA (se ligada) com a pergunta e as opções que o cliente acabou de ver.
+async function aiUnderstand(ctx: BotContext, question: string, options: string[], text: string, services?: Service[]): Promise<Understanding | null> {
+  if (!env.ANTHROPIC_API_KEY || !ctx.settings.botAiEnabled) return null;
+  return understand({
+    companyId: ctx.companyId,
+    companyName: ctx.companyName,
+    settings: ctx.settings,
+    flow: flowOf(ctx),
+    services: services ?? await activeServices(ctx.companyId),
+    question,
+    options,
+    text,
+  });
+}
+
+const wishOf = (u: Understanding | null): SessionData['wish'] =>
+  u?.date || u?.time ? { date: u.date ?? undefined, time: u.time ?? undefined } : undefined;
+
+function manageActionOf(u: Understanding | null, offered: ManageAction[]): ManageAction | undefined {
+  if (!u) return undefined;
+  if (u.option) return offered[u.option - 1];
+  return offered.find((a) => a === u.intent);
+}
+
+// Opção do menu que corresponde ao que a IA entendeu (número ou intenção).
+function optionFromAi(u: Understanding, menu: FlowNode): FlowNode | undefined {
+  const options = menu.options ?? [];
+  if (u.option) return options[u.option - 1];
+  const manage = CONFIRM_ACTIONS.includes(u.intent as ManageAction);
+  const action = manage ? 'meus' : (['agendar', 'meus', 'servicos', 'equipe'] as const).find((a) => a === u.intent);
+  return action ? options.find((o) => o.type === 'action' && o.action === action) : undefined;
+}
+
+// Texto livre no menu (ou na primeira mensagem): segue para a opção certa,
+// já levando serviço/dia/horário, ou responde a pergunta e mostra o menu de novo.
+// Devolve false quando a IA não ajudou (o bot segue com o comportamento normal).
+async function tryAiMenu(ctx: BotContext, menu: FlowNode, data: SessionData, text: string, name: string, greet: boolean): Promise<boolean> {
+  const root = flowOf(ctx);
+  const vars = { empresa: ctx.companyName };
+  const services = env.ANTHROPIC_API_KEY && ctx.settings.botAiEnabled ? await activeServices(ctx.companyId) : [];
+  const u = await aiUnderstand(ctx, menuText(ctx, menu), (menu.options ?? []).map((o) => fillTemplate(o.label, vars)), text, services);
+  if (!u) return false;
+  let parent = menu;
+  let option = optionFromAi(u, menu);
+  if (!option && menu.id !== root.id) {
+    option = optionFromAi({ ...u, option: null }, root);
+    parent = root;
+  }
+  if (!option && !u.answer) return false;
+
+  if (greet) await sayParts(ctx, root.messages.map((m) => fillTemplate(m, { nome: name, empresa: ctx.companyName })), root.together);
+  if (!option) {
+    await setSession(ctx, 'MENU', { askName: data.askName, nodeId: menu.id === root.id ? undefined : menu.id });
+    await say(ctx, blocks(u.answer, menuText(ctx, menu)));
+    return true;
+  }
+
+  // "Quero remarcar pra sexta": vai direto no próximo horário do cliente.
+  const manage = CONFIRM_ACTIONS.find((a) => a === u.intent);
+  if (manage && option.type === 'action' && option.action === 'meus' && ctx.clientId) {
+    const next = await appointmentsService.nextAppointmentOf(ctx.companyId, ctx.clientId);
+    if (next && await answerConfirmation(ctx, next, MANAGE_CODES[manage], wishOf(u))) return true;
+  }
+
+  const serviceIds = u.services.map((n) => services[n - 1]?.id).filter((id): id is string => Boolean(id));
+  await runNode(ctx, option, parent, { askName: data.askName, serviceIds: serviceIds.length ? serviceIds : undefined, wish: wishOf(u) }, name);
+  return true;
+}
+
+// Serviço escolhido: usa o dia e o horário que o cliente já pediu, se houver.
+// Horário livre = agenda direto; senão oferece os horários do dia ou outros dias.
+async function scheduleWish(ctx: BotContext, data: SessionData, prefix?: string) {
+  const { wish, ...rest } = data;
+  const date = wish?.date;
+  if (!date) {
+    await offerDays(ctx, rest, prefix ?? '');
+    return;
+  }
+  if (!ctx.settings.workDays.includes(weekdayOf(date))) {
+    await offerDays(ctx, rest, blocks(prefix, `Não atendemos ${WEEKDAYS[weekdayOf(date)]}.`));
+    return;
+  }
+  const times = await freeTimes(ctx.companyId, ctx.settings, date, await durationOf(ctx, rest), rest.appointmentId);
+  if (!times.length) {
+    await offerDays(ctx, rest, blocks(prefix, `Não temos mais horários livres ${onDay(date)}.`));
+    return;
+  }
+  if (wish.time && times.includes(wish.time)) {
+    await book(ctx, { ...rest, date }, wish.time, prefix);
+    return;
+  }
+  await offerTimes(ctx, { ...rest, date }, times, blocks(prefix, wish.time && `Às ${wish.time} não temos horário livre ${onDay(date)}.`));
 }
 
 function manageActionFromText(answer: string): ManageAction | undefined {
@@ -719,8 +882,14 @@ async function offerServices(ctx: BotContext, data: SessionData, prefix: string)
     await handOff(ctx, blocks(prefix, 'Ainda não temos serviços disponíveis para agendar pelo WhatsApp.'));
     return;
   }
+  // O cliente já disse o serviço (IA): pula a pergunta.
+  const known = services.filter((s) => data.serviceIds?.includes(s.id));
+  if (known.length) {
+    await scheduleWish(ctx, { ...data, serviceIds: known.map((s) => s.id) }, `${prefix} Vamos agendar ${known.map((s) => s.name).join(' + ')}.`.trim());
+    return;
+  }
   if (services.length === 1) {
-    await offerDays(ctx, { ...data, serviceIds: [services[0].id] }, `${prefix} Vamos agendar ${services[0].name}.`.trim());
+    await scheduleWish(ctx, { ...data, serviceIds: [services[0].id] }, `${prefix} Vamos agendar ${services[0].name}.`.trim());
     return;
   }
   await setSession(ctx, 'ASK_SERVICE', data);
@@ -752,7 +921,7 @@ async function offerTimes(ctx: BotContext, data: SessionData, times: string[], p
   await say(ctx, blocks(prefix, `Horários livres ${onDay(data.date!)}:`, numbered(times), 'Responda com o número do horário.', BACK_OPTION));
 }
 
-async function book(ctx: BotContext, data: SessionData, time: string) {
+async function book(ctx: BotContext, data: SessionData, time: string, prefix?: string) {
   const { settings } = ctx;
   const date = data.date!;
   const duration = await durationOf(ctx, data);
@@ -793,7 +962,7 @@ async function book(ctx: BotContext, data: SessionData, time: string) {
   await finishConversation(ctx);
   const confirmation = fillTemplate(settings.confirmationMessage, appointmentVars(appointment, ctx.companyName));
   const duration2 = `Duração prevista: ${durationLabel(duration)} (até ${appointment.endTime}).`;
-  await say(ctx, blocks(data.appointmentId ? 'Pronto, horário remarcado!' : null, confirmation, duration2, reminderNote(settings, date, time)));
+  await say(ctx, blocks(data.appointmentId ? 'Pronto, horário remarcado!' : prefix, confirmation, duration2, reminderNote(settings, date, time)));
 }
 
 async function findActive(ctx: BotContext, appointmentId: string) {
@@ -838,7 +1007,7 @@ async function showAppointment(ctx: BotContext, appointment: FullAppointment, pr
 
 // Resposta ao lembrete ou ação escolhida em "Meus agendamentos".
 // Devolve false se a mensagem não for uma das opções.
-async function answerConfirmation(ctx: BotContext, appointment: FullAppointment, answer: string): Promise<boolean> {
+async function answerConfirmation(ctx: BotContext, appointment: FullAppointment, answer: string, wish?: SessionData['wish']): Promise<boolean> {
   const when = `${servicesOf(appointment)} ${onDay(appointment.date)} às ${appointment.startTime}`;
 
   if (CONFIRM_WORDS.has(answer)) {
@@ -849,7 +1018,7 @@ async function answerConfirmation(ctx: BotContext, appointment: FullAppointment,
   }
   if (answer === '2' || answer.includes('remarc')) {
     const serviceIds = appointment.items.map((i) => i.serviceId).filter((id): id is string => Boolean(id));
-    await offerDays(ctx, { appointmentId: appointment.id, serviceIds }, 'Sem problemas, vamos remarcar.');
+    await scheduleWish(ctx, { appointmentId: appointment.id, serviceIds, wish }, 'Sem problemas, vamos remarcar.');
     return true;
   }
   if (answer === '3' || answer.includes('cancel')) {

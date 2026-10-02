@@ -7,12 +7,21 @@ import { prisma } from '../../lib/prisma';
 import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
+import { transcriptionEnabled } from '../../lib/transcription';
 import * as settingsService from '../settings/settings.service';
+import * as ai from './whatsapp.ai';
 import * as connection from './whatsapp.connection';
-import { defaultFlow, flowSchema, getFlow } from './whatsapp.flow';
+import { defaultFlow, findNode, flowSchema, getFlow } from './whatsapp.flow';
 import * as sora from './whatsapp.sora';
 
 const saveFlowSchema = z.object({ flow: flowSchema });
+
+const understandSchema = z.object({
+  flow: flowSchema,
+  // Menu em que o cliente está no simulador (vazio = menu principal).
+  nodeId: z.string().max(40).optional(),
+  text: z.string().trim().min(1, 'Escreva uma mensagem.').max(600),
+});
 
 const soraSchema = z.object({
   messages: z.array(z.object({
@@ -94,4 +103,53 @@ whatsappRouter.get('/flow/sora', requireRole(Role.ADMIN), asyncHandler(async (re
 
 whatsappRouter.post('/flow/sora', requireRole(Role.ADMIN), validate(soraSchema), asyncHandler(async (req: Request, res: Response) => {
   return res.json(await sora.askSora(companyOf(req), req.body.messages, req.body.flow));
+}));
+
+// IA do atendimento: disponível no servidor, uso do mês e transcrição de áudio.
+whatsappRouter.get('/ai', asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ ...(await ai.botAiUsage(companyOf(req))), transcription: transcriptionEnabled() });
+}));
+
+// "Testar conversa" do editor: o que a IA entenderia de uma mensagem escrita
+// no menu atual (conta no limite do mês, como no WhatsApp).
+whatsappRouter.post('/flow/understand', requireRole(Role.ADMIN), validate(understandSchema), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  const flow = req.body.flow;
+  const found = findNode(flow, req.body.nodeId);
+  const menu = found?.node.type === 'menu' ? found.node : flow;
+  const [settings, company, services] = await Promise.all([
+    settingsService.getSettings(companyId),
+    prisma.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } }),
+    prisma.service.findMany({ where: { companyId, active: true }, orderBy: [{ position: 'asc' }, { name: 'asc' }] }),
+  ]);
+  if (!settings.botAiEnabled) throw HttpError.badRequest('A IA do atendimento está desligada. Ligue em "Configurações do bot".');
+  const usage = await ai.botAiUsage(companyId);
+  if (!usage.available) throw HttpError.badRequest('A IA ainda não está configurada neste servidor.');
+  if (usage.used >= usage.limit) throw HttpError.forbidden(`A IA já interpretou ${usage.limit} mensagens este mês. O limite renova no dia 1º.`);
+
+  const options: { id: string; label: string; type: string; action?: string }[] = menu.options ?? [];
+  const result = await ai.understand({
+    companyId,
+    companyName: company.name,
+    settings,
+    flow,
+    services,
+    question: menu.prompt ?? '',
+    options: options.map((o) => o.label),
+    text: req.body.text,
+  });
+  if (!result) throw HttpError.badRequest('A IA não conseguiu responder agora. Tente de novo.');
+
+  // Mesma escolha que o bot faria: número da opção ou função pela intenção.
+  const actionIntent = ['confirmar', 'remarcar', 'cancelar'].includes(result.intent) ? 'meus' : result.intent;
+  const option = result.option ? options[result.option - 1] : options.find((o) => o.type === 'action' && o.action === actionIntent);
+  return res.json({
+    optionId: option?.id ?? null,
+    intent: result.intent,
+    answer: result.answer,
+    services: result.services.map((n) => services[n - 1]?.name).filter(Boolean),
+    date: result.date,
+    time: result.time,
+    usage: await ai.botAiUsage(companyId),
+  });
 }));

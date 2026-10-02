@@ -46,6 +46,21 @@ const schema = z.object({
   SORA_MODEL: z.string().default('claude-opus-5-5'),
   // Pedidos à Sora por empresa por mês (cada mensagem no chat conta 1).
   SORA_MONTHLY_LIMIT: z.coerce.number().int().positive().default(50),
+  // IA do atendimento: entende o que o cliente escreveu quando não é um número
+  // nem uma palavra-chave (whatsapp.ai.ts). Modelo barato e rápido; mesma chave da Sora.
+  BOT_AI_MODEL: z.string().default('claude-haiku-4-5'),
+  // Mensagens interpretadas pela IA por empresa por mês. Passou disso, o bot volta a pedir o número.
+  BOT_AI_MONTHLY_LIMIT: z.coerce.number().int().positive().default(1500),
+
+  // Transcrição de áudio (API compatível com a da OpenAI: Groq, OpenAI...).
+  // Sem a chave, o bot pede para o cliente digitar.
+  TRANSCRIBE_API_KEY: z.string().optional(),
+  TRANSCRIBE_API_URL: z.string().default('https://api.groq.com/openai/v1'),
+  TRANSCRIBE_MODEL: z.string().default('whisper-large-v3-turbo'),
+  // Preço por hora de áudio (US$), só para o painel de gastos. Groq whisper-large-v3-turbo: 0.04.
+  TRANSCRIBE_USD_PER_HOUR: z.coerce.number().nonnegative().default(0.04),
+  // Áudios mais longos que isso não são transcritos (segundos).
+  TRANSCRIBE_MAX_SECONDS: z.coerce.number().int().positive().default(120),
 
   // E-mail (recuperação de senha). Sem SMTP_HOST o link aparece no terminal.
   SMTP_HOST: z.string().optional(),

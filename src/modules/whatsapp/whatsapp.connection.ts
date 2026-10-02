@@ -1,6 +1,7 @@
 import {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   WAMessage,
   WAMessageKey,
   WASocket,
@@ -320,12 +321,19 @@ async function handleUpsert(companyId: string, sock: WASocket, message: WAMessag
     return;
   }
 
+  const audio = content?.audioMessage;
   await handleIncomingMessage({
     companyId,
     contactId,
     messageId: message.key.id ?? undefined,
     text,
     mediaType: MEDIA_TYPES[contentType],
+    // Baixado só se o bot for transcrever (whatsapp.bot.ts).
+    audio: audio ? {
+      seconds: audio.seconds ?? 0,
+      mimetype: audio.mimetype ?? 'audio/ogg',
+      load: () => downloadMediaMessage(message, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage }),
+    } : undefined,
     profileName: message.pushName ?? undefined,
     send: (reply) => sendText(companyId, jid, reply),
     saveContact: (name) => saveContact(companyId, contactId, jid, name),

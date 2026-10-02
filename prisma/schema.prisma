@@ -383,6 +383,13 @@ model CompanySettings {
   // Uso da Sora (IA que monta o fluxo) no mês corrente, para o limite mensal.
   soraMonth           String?
   soraCount           Int     @default(0)
+  // IA do atendimento (whatsapp.ai.ts): entende mensagens escritas livremente
+  // quando não são o número de uma opção. Uso no mês, para o limite mensal.
+  botAiEnabled        Boolean @default(true)
+  botAiMonth          String?
+  botAiCount          Int     @default(0)
+  // Áudios do cliente viram texto (lib/transcription.ts) e seguem o mesmo atendimento.
+  transcribeAudio     Boolean @default(true)
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

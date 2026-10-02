@@ -25,6 +25,8 @@ const updateSettingsSchema = z.object({
   botEnabled: z.boolean().optional(),
   autoCreateClient: z.boolean().optional(),
   askName: z.boolean().optional(),
+  botAiEnabled: z.boolean().optional(),
+  transcribeAudio: z.boolean().optional(),
   greetingMessage: message('mensagem de boas-vindas').optional(),
   handoffMessage: message('mensagem de transferência para a equipe').optional(),
   confirmationMessage: message('mensagem de confirmação').optional(),
