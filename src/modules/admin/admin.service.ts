@@ -298,3 +298,35 @@ export async function surveySummary() {
     })),
   };
 }
+
+// ============ LGPD: pedidos dos titulares ============
+
+export async function privacyRequests() {
+  const [requests, consents] = await Promise.all([
+    prisma.privacyRequest.findMany({
+      orderBy: [{ status: 'desc' }, { createdAt: 'asc' }],
+      take: 300,
+      include: { user: { select: { name: true, email: true, memberships: { select: { role: true, company: { select: { name: true } } } } } } },
+    }),
+    prisma.cookieConsent.groupBy({ by: ['analytics', 'marketing'], _count: true }),
+  ]);
+  return {
+    requests: requests.map((r) => ({
+      id: r.id, type: r.type, message: r.message, status: r.status, response: r.response, createdAt: r.createdAt, resolvedAt: r.resolvedAt,
+      // Prazo de 15 dias para a resposta completa (art. 19, II).
+      dueAt: new Date(r.createdAt.getTime() + 15 * 24 * 60 * 60 * 1000),
+      user: { name: r.user.name, email: r.user.email, companies: r.user.memberships.map((m) => `${m.company.name} (${m.role === 'ADMIN' ? 'administrador' : 'funcionário'})`) },
+    })),
+    consents: {
+      total: consents.reduce((sum, c) => sum + c._count, 0),
+      analytics: consents.filter((c) => c.analytics).reduce((sum, c) => sum + c._count, 0),
+      marketing: consents.filter((c) => c.marketing).reduce((sum, c) => sum + c._count, 0),
+    },
+  };
+}
+
+export async function resolvePrivacyRequest(id: string, response: string) {
+  const request = await prisma.privacyRequest.findUnique({ where: { id } });
+  if (!request) throw HttpError.notFound('Pedido não encontrado.');
+  return prisma.privacyRequest.update({ where: { id }, data: { status: 'DONE', response, resolvedAt: new Date() } });
+}

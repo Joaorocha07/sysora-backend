@@ -17,6 +17,7 @@ import { servicesRouter } from './modules/services/services.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
 import { usersRouter } from './modules/users/users.routes';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.routes';
+import { privacyRouter } from './modules/privacy/privacy.routes';
 import { surveyRouter } from './modules/survey/survey.routes';
 import { webhooksRouter } from './modules/webhooks/webhooks.routes';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes';
@@ -58,6 +59,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/survey', surveyRouter);
+app.use('/api/privacy', privacyRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
 

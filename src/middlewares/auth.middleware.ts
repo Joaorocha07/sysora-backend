@@ -22,6 +22,21 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
   }
 }
 
+// Rotas públicas que aproveitam a sessão se houver (ex.: consentimento de
+// cookies de quem já está logado). Token ausente ou inválido segue sem req.auth.
+export function optionalAuthenticate(req: Request, _res: Response, next: NextFunction) {
+  const token = extractBearerToken(req);
+  if (token) {
+    try {
+      const payload = verifyAccessToken(token);
+      req.auth = { userId: payload.sub, companyId: payload.companyId, role: payload.role, isSuperAdmin: payload.isSuperAdmin };
+    } catch {
+      // Sessão expirada: trata como visitante.
+    }
+  }
+  next();
+}
+
 // Rotas de dados de uma empresa: exige sessão dentro de uma empresa.
 export function requireCompany(req: Request, _res: Response, next: NextFunction) {
   if (!req.auth) return next(HttpError.unauthorized());

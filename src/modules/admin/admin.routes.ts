@@ -61,6 +61,15 @@ adminRouter.post('/whatsapp/check', asyncHandler(async (req: Request, res: Respo
   return res.json(await whatsappCloud.checkPlatform(requestBase(req)));
 }));
 
+// LGPD: pedidos dos titulares (acesso, correção, exclusão...). Prazo de 15 dias (art. 19).
+adminRouter.get('/privacy/requests', asyncHandler(async (_req: Request, res: Response) => {
+  return res.json(await adminService.privacyRequests());
+}));
+
+adminRouter.post('/privacy/requests/:id/resolve', validate(z.object({ response: z.string().trim().min(1, 'Escreva a resposta enviada ao titular.').max(2000) })), asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ request: await adminService.resolvePrivacyRequest(req.params.id, req.body.response) });
+}));
+
 // Pesquisa inicial: totais por resposta e as últimas respostas.
 adminRouter.get('/surveys', asyncHandler(async (_req: Request, res: Response) => {
   return res.json(await adminService.surveySummary());

@@ -29,7 +29,11 @@ const credentials = {
   googleToken: z.string().min(1).optional(),
 };
 
+// LGPD: o cadastro pelo site exige aceitar os Termos e a Política de Privacidade.
+const acceptTerms = z.literal(true, { errorMap: () => ({ message: 'Para continuar, aceite os Termos de Uso e a Política de Privacidade.' }) });
+
 export const registerCompanySchema = z.object({
+  acceptTerms,
   plan: z.nativeEnum(Plan).default(Plan.INICIAL),
   companyName: z.string().trim().min(2, 'Informe o nome da empresa.').max(120),
   name: z.string().trim().min(2, 'Informe seu nome completo.').max(120),
@@ -38,6 +42,7 @@ export const registerCompanySchema = z.object({
 });
 
 export const registerEmployeeSchema = z.object({
+  acceptTerms,
   inviteCode: z.string().trim().min(4, 'Informe o código da empresa.').max(20),
   name: z.string().trim().min(2, 'Informe seu nome completo.').max(120),
   phone,

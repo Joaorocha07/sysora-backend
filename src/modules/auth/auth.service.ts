@@ -1,4 +1,5 @@
 import { MembershipStatus, Plan, Role, SubscriptionStatus } from '@prisma/client';
+import { TERMS_VERSION } from '../../lib/legal';
 import { isAccountActive, subscriptionSummary, trialEnd } from '../../lib/plans';
 import { normalizeInviteCode, uniqueInviteCode } from '../../lib/inviteCode';
 import { uniqueCompanySlug } from '../../lib/slug';
@@ -304,6 +305,9 @@ function resolveCredentials(input: Credentials): {
   return { email: input.email, password: input.password, google: null };
 }
 
+// LGPD: aceite dos Termos e da Política de Privacidade no cadastro pelo site.
+const termsAccepted = () => ({ termsAcceptedAt: new Date(), termsVersion: TERMS_VERSION });
+
 export async function registerCompany(input: Credentials & { companyName: string; name: string; phone?: string | null; plan: Plan }) {
   const { email, password, google } = resolveCredentials(input);
   if (await prisma.user.findUnique({ where: { email } })) {
@@ -333,7 +337,7 @@ export async function registerCompany(input: Credentials & { companyName: string
         settings: { create: {} },
       },
     });
-    const user = await tx.user.create({ data: { name: input.name, email, phone: input.phone || null, passwordHash, ...google, lastLoginAt: new Date() } });
+    const user = await tx.user.create({ data: { name: input.name, email, phone: input.phone || null, passwordHash, ...google, lastLoginAt: new Date(), ...termsAccepted() } });
     await tx.companyMembership.create({ data: { userId: user.id, companyId: company.id, role: Role.ADMIN } });
     return { userId: user.id, companyId: company.id };
   });
@@ -365,6 +369,8 @@ export async function registerEmployee(input: Credentials & { inviteCode: string
         ? 'Este e-mail já tem uma conta na Sysora criada com o Google. Use o botão "Cadastrar com Google" para pedir acesso a esta empresa.'
         : 'Este e-mail já tem uma conta na Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
     }
+    // Aceitou os termos na tela de pedido de acesso (LGPD).
+    await prisma.user.update({ where: { id: user.id }, data: termsAccepted() });
     const existing = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId: user.id, companyId: company.id } } });
     if (existing?.status === MembershipStatus.PENDING) throw HttpError.conflict('Você já pediu acesso a esta empresa. Aguarde a aprovação do administrador.');
     if (existing?.status === MembershipStatus.REJECTED) {
@@ -384,7 +390,7 @@ export async function registerEmployee(input: Credentials & { inviteCode: string
     }
   } else {
     user = await prisma.user.create({
-      data: { name: input.name, email, phone: input.phone || null, passwordHash: await hashPassword(password), ...google },
+      data: { name: input.name, email, phone: input.phone || null, passwordHash: await hashPassword(password), ...google, ...termsAccepted() },
     });
   }
 
