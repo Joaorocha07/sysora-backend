@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { Role } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
+import { documentField } from '../../lib/document';
 import { uniqueInviteCode } from '../../lib/inviteCode';
 import { prisma } from '../../lib/prisma';
 import { authenticate, companyOf, requireCompany, requireRole } from '../../middlewares/auth.middleware';
@@ -43,7 +44,7 @@ const updateSettingsSchema = z.object({
 
 const companyProfileSchema = z.object({
   name: z.string().trim().min(2, 'Informe o nome da empresa.').optional(),
-  document: z.string().trim().max(30).nullish(),
+  document: documentField,
   phone: z.string().trim().max(30).nullish(),
   email: z.string().trim().email('E-mail inválido.').nullish().or(z.literal('')),
 });

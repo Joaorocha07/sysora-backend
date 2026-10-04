@@ -2,6 +2,7 @@ import { Request, Response, Router } from 'express';
 import { Plan, SubscriptionStatus } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
+import { documentField } from '../../lib/document';
 import { getPlatformSettings, updatePlatformSettings } from '../../lib/platformSettings';
 import { planCatalog } from '../../lib/plans';
 import { authenticate, requireSuperAdmin } from '../../middlewares/auth.middleware';
@@ -14,7 +15,7 @@ const optionalText = z.string().trim().max(120).nullish();
 
 const companyFields = {
   name: z.string().trim().min(2, 'Informe o nome da empresa.'),
-  document: optionalText,
+  document: documentField,
   phone: optionalText,
   email: z.string().trim().email('E-mail da empresa inválido.').nullish().or(z.literal('')),
 };

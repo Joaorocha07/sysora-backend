@@ -46,7 +46,8 @@ export const PLANS: Record<Plan, {
   },
 };
 
-export const TRIAL_DAYS = 7;
+// Teste grátis de 1 mês (30 dias, a mesma conta de um mês pago em addMonth).
+export const TRIAL_DAYS = 30;
 // Dias de tolerância depois do vencimento antes de bloquear o acesso.
 export const GRACE_DAYS = 5;
 const DAY_MS = 24 * 60 * 60 * 1000;

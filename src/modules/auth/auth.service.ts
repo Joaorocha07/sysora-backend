@@ -318,7 +318,8 @@ export async function registerCompany(input: Credentials & { companyName: string
 
   const created = await prisma.$transaction(async (tx) => {
     const account = await tx.account.create({
-      data: { name: input.companyName, plan: input.plan, status: SubscriptionStatus.TRIAL, trialEndsAt: trialEnd() },
+      // O teste grátis é sempre o do plano Inicial (a IA do Avançado só libera com o pagamento).
+      data: { name: input.companyName, plan: Plan.INICIAL, status: SubscriptionStatus.TRIAL, trialEndsAt: trialEnd() },
     });
     const company = await tx.company.create({
       data: {
