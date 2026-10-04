@@ -1,5 +1,6 @@
 import { CompanySettings } from '@prisma/client';
 import { isAccountActive } from '../../lib/plans';
+import { schemaState } from '../../lib/schemaGuard';
 import { prisma } from '../../lib/prisma';
 import { addDays, dateTime, pad, toIsoDate } from '../../lib/time';
 import { appointmentInclude, AppointmentWithRelations } from '../appointments/appointments.service';
@@ -140,8 +141,9 @@ export async function closeIdleHandoffs(): Promise<number> {
 }
 
 export function startWhatsAppJobs(): void {
-  const reminders = () => { sendDueReminders().catch((err) => console.error('Falha ao verificar lembretes do WhatsApp:', err)); };
-  const handoffs = () => { closeIdleHandoffs().catch((err) => console.error('Falha ao verificar atendimentos do WhatsApp:', err)); };
+  // Banco desatualizado (schemaGuard): não roda, para não encher o log de erros.
+  const reminders = () => { if (!schemaState.ok) return; sendDueReminders().catch((err) => console.error('Falha ao verificar lembretes do WhatsApp:', err)); };
+  const handoffs = () => { if (!schemaState.ok) return; closeIdleHandoffs().catch((err) => console.error('Falha ao verificar atendimentos do WhatsApp:', err)); };
   // Primeira verificação depois que as conexões tiveram tempo de reabrir.
   setTimeout(() => { reminders(); handoffs(); }, 60_000);
   setInterval(reminders, CHECK_INTERVAL_MS);

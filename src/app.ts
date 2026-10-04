@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import { env } from './config/env';
 import { errorHandler, notFoundHandler } from './middlewares/error.middleware';
 import { apiRateLimiter } from './middlewares/rateLimit.middleware';
+import { requireSchema, schemaState } from './lib/schemaGuard';
 import { accountRouter } from './modules/account/account.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { appointmentsRouter } from './modules/appointments/appointments.routes';
@@ -45,7 +46,11 @@ app.use(cookieParser());
 app.use(morgan(env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 app.use(apiRateLimiter);
 
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok', database: schemaState.ok ? 'ok' : 'out_of_date' }));
+// Para monitoramento: 503 enquanto houver migration pendente.
+app.get('/health/db', (_req, res) => res.status(schemaState.ok ? 200 : 503).json({ ok: schemaState.ok, pending: schemaState.pending, checkedAt: schemaState.checkedAt }));
+
+app.use('/api', requireSchema);
 
 app.use('/api/auth', authRouter);
 app.use('/api/admin', adminRouter);

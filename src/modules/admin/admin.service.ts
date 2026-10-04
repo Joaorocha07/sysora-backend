@@ -16,6 +16,12 @@ import { disconnectAll as disconnectWhatsApp } from '../whatsapp/whatsapp.transp
 
 type CompanyInput = { name: string; document?: string | null; phone?: string | null; email?: string | null };
 
+// Empresa só do admin master (ex.: ele se cadastrou pelo site): não é cliente
+// da Sysora, então fica fora da lista e das métricas do painel.
+const customerCompany = {
+  NOT: { AND: [{ memberships: { some: { user: { isSuperAdmin: true } } } }, { memberships: { none: { user: { isSuperAdmin: false } } } }] },
+};
+
 const monthStart = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
@@ -23,12 +29,12 @@ const monthStart = () => {
 
 export async function stats() {
   const [companies, accounts, users, clients, appointmentsThisMonth, connected] = await Promise.all([
-    prisma.company.count(),
-    prisma.account.findMany({ select: { plan: true, status: true, trialEndsAt: true, paidUntil: true } }),
+    prisma.company.count({ where: customerCompany }),
+    prisma.account.findMany({ where: { companies: { some: customerCompany } }, select: { plan: true, status: true, trialEndsAt: true, paidUntil: true } }),
     prisma.user.count({ where: { isSuperAdmin: false } }),
-    prisma.client.count(),
-    prisma.appointment.count({ where: { date: { gte: monthStart() }, status: { not: AppointmentStatus.CANCELED } } }),
-    prisma.companySettings.count({ where: { whatsappConnected: true } }),
+    prisma.client.count({ where: { company: customerCompany } }),
+    prisma.appointment.count({ where: { company: customerCompany, date: { gte: monthStart() }, status: { not: AppointmentStatus.CANCELED } } }),
+    prisma.companySettings.count({ where: { company: customerCompany, whatsappConnected: true } }),
   ]);
   const paying = accounts.filter((a) => a.status === SubscriptionStatus.ACTIVE && isAccountActive(a));
   return {
@@ -77,6 +83,7 @@ export async function listUsers() {
 
 export async function listCompanies() {
   const companies = await prisma.company.findMany({
+    where: customerCompany,
     orderBy: { createdAt: 'desc' },
     include: {
       account: true,

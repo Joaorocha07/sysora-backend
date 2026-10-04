@@ -147,6 +147,7 @@ model Company {
   whatsappAuth     WhatsAppAuth[]
   whatsappCloud    WhatsAppCloudAccount?
   whatsappUsage    WhatsAppUsage[]
+  emailInboxes     EmailInbox[]
   account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
   surveys          OnboardingSurvey[]
@@ -265,6 +266,7 @@ model Client {
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
   appointments Appointment[]
   messages     Message[]
+  emailAccess  ClientEmailAccess[]
 
   @@index([companyId])
   @@index([companyId, whatsappId])
@@ -568,4 +570,40 @@ model PrivacyRequest {
 
   @@index([status, createdAt])
   @@map("privacy_requests")
+}
+
+// Caixa de e-mail (Gmail, por IMAP com senha de app) de onde o bot busca
+// códigos de acesso para mandar ao cliente (opção "Receber código" do fluxo).
+model EmailInbox {
+  id          String   @id @default(uuid())
+  companyId   String
+  label       String
+  email       String
+  // Senha de app do Google, criptografada (lib/crypto.ts).
+  passwordEnc String
+  // Domínios ou e-mails remetentes aceitos, separados por vírgula.
+  senders     String
+  active      Boolean  @default(true)
+  lastError   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  clients ClientEmailAccess[]
+
+  @@unique([companyId, email])
+  @@map("email_inboxes")
+}
+
+// Clientes que podem receber os códigos de cada caixa.
+model ClientEmailAccess {
+  clientId String
+  inboxId  String
+
+  client Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  inbox  EmailInbox @relation(fields: [inboxId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, inboxId])
+  @@index([inboxId])
+  @@map("client_email_access")
 }

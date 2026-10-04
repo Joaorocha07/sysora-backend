@@ -1,0 +1,52 @@
+# Backup diário do banco de produção (Supabase) com pg_dump, criptografado
+# com GPG antes de ir para o GitHub (tem dados pessoais: LGPD).
+#
+# Configurar uma vez em Settings → Secrets and variables → Actions:
+#   BACKUP_DATABASE_URL  -> a DIRECT_URL do Supabase (porta 5432, sem pgbouncer)
+#   BACKUP_PASSPHRASE    -> uma senha forte; guarde fora do GitHub (sem ela o backup não abre)
+#
+# Restaurar (num banco NOVO/vazio, nunca por cima do de produção sem backup):
+#   gpg --decrypt sysora-AAAA-MM-DD.dump.gpg > sysora.dump
+#   pg_restore --no-owner --dbname "<url do banco novo>" sysora.dump
+name: Backup do banco
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # 03:00 em Brasília
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar cliente do PostgreSQL 17
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-17
+
+      - name: pg_dump (schema public, só leitura)
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          STAMP=$(date -u +%Y-%m-%d)
+          /usr/lib/postgresql/17/bin/pg_dump "$DATABASE_URL" --schema=public --format=custom --no-owner --no-privileges --file "sysora-$STAMP.dump"
+          ls -lh "sysora-$STAMP.dump"
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+
+      - name: Criptografar
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$PASSPHRASE" --symmetric --cipher-algo AES256 "sysora-$STAMP.dump"
+          rm "sysora-$STAMP.dump"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysora-db-${{ env.STAMP }}
+          path: sysora-${{ env.STAMP }}.dump.gpg
+          retention-days: 30

@@ -2,6 +2,8 @@ import { Request, Response, Router } from 'express';
 import { Plan, SubscriptionStatus } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
+import { HttpError } from '../../lib/httpError';
+import { prisma } from '../../lib/prisma';
 import { documentField } from '../../lib/document';
 import { getPlatformSettings, updatePlatformSettings } from '../../lib/platformSettings';
 import { planCatalog } from '../../lib/plans';
@@ -121,7 +123,14 @@ adminRouter.patch('/companies/:id', validate(updateCompanySchema), asyncHandler(
   return res.json({ company: await adminService.updateCompany(req.params.id, req.body) });
 }));
 
+// Trava: excluir apaga tudo da empresa, então exige o nome dela digitado (confirmName).
 adminRouter.delete('/companies/:id', asyncHandler(async (req: Request, res: Response) => {
+  const company = await prisma.company.findUnique({ where: { id: req.params.id }, select: { name: true } });
+  if (!company) throw HttpError.notFound('Empresa não encontrada.');
+  const typed = String((req.body as { confirmName?: unknown } | undefined)?.confirmName ?? '').trim().toLowerCase();
+  if (typed !== company.name.trim().toLowerCase()) {
+    throw HttpError.badRequest('Para excluir, digite o nome da empresa exatamente como aparece no painel.');
+  }
   await adminService.deleteCompany(req.params.id);
   return res.status(204).send();
 }));
