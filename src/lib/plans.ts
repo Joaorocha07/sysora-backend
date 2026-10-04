@@ -1,6 +1,6 @@
 import { Account, Plan, SubscriptionStatus } from '@prisma/client';
 
-// Catálogo de planos do Sysora. Os preços são mensais, em centavos.
+// Catálogo de planos da Sysora. Os preços são mensais, em centavos.
 // maxEmployees: pessoas além do administrador (o dono) em cada empresa. A
 // conta é "administrador + N": promover um funcionário a administrador não
 // libera vaga, então o limite não pode ser contornado.

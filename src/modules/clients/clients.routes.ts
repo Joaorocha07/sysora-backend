@@ -94,8 +94,12 @@ clientsRouter.patch('/:id', validate(clientSchema.partial()), asyncHandler(async
   if (!existing) throw HttpError.notFound('Cliente não encontrado.');
   const data: Prisma.ClientUpdateInput = clean(req.body);
   // Telefone alterado à mão: atualiza o destino do WhatsApp (se o cliente
-  // ainda não tiver conversado pelo bot, que já traz o número certo).
-  if (req.body.phone && existing.source !== 'BOT') data.whatsappId = whatsappIdFromPhone(req.body.phone);
+  // ainda não tiver conversado pelo bot, que já traz o número certo, ou se o
+  // WhatsApp tinha escondido o número dele: id anônimo @lid da conexão por QR Code).
+  if (req.body.phone) {
+    const whatsappId = whatsappIdFromPhone(req.body.phone);
+    if (existing.source !== 'BOT' || (existing.whatsappId?.includes('@') && whatsappId)) data.whatsappId = whatsappId;
+  }
   const client = await prisma.client.update({ where: { id: existing.id }, data });
   return res.json({ client });
 }));

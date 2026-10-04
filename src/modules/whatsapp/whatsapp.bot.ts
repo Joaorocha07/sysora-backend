@@ -1,4 +1,4 @@
-import { AppointmentStatus, CompanySettings, MessageSender, Service, Source } from '@prisma/client';
+import { AppointmentStatus, CompanySettings, MessageSender, Service, ServiceKind, Source } from '@prisma/client';
 import { env } from '../../config/env';
 import { hasAi, isAccountActive } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
@@ -18,7 +18,7 @@ import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 //   meus agendamentos: MANAGE (confirmar / remarcar / cancelar)
 //   serviços e valores
 //   falar com a equipe: HUMAN (bot em silêncio enquanto a equipe atende)
-// A equipe responder (pelo Sysora ou pelo celular) também abre HUMAN. Se a
+// A equipe responder (pela Sysora ou pelo celular) também abre HUMAN. Se a
 // equipe passar humanTimeoutMinutes sem escrever, o bot encerra o atendimento.
 // O lembrete da véspera (whatsapp.jobs.ts) abre a etapa CONFIRM:
 //   1) confirmar  2) remarcar -> ASK_DATE  3) cancelar
@@ -28,7 +28,7 @@ import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 // direto se o horário estiver livre) ou responde uma pergunta com os dados da
 // empresa. Áudios são transcritos (lib/transcription.ts) e seguem igual.
 
-type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'HUMAN';
+type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'ASK_PRODUCT' | 'HUMAN';
 type SessionData = {
   askName?: boolean;
   // MENU depois de concluir algo: o cliente pode escolher uma opção direto;
@@ -50,13 +50,17 @@ type SessionData = {
   staffAt?: string;
   requestedAt?: string;
 };
+// Envia um texto ao contato. Pode devolver o texto que de fato saiu (ex.: o
+// template da API oficial no lugar da mensagem do lembrete), que é o que fica na conversa.
+export type SendText = (text: string) => Promise<void | string>;
+
 type BotContext = {
   companyId: string;
   companyName: string;
   // Número do contato só com dígitos (ex.: 5531999999999). Se o WhatsApp não
   // revelar o número, é o JID anônimo do contato (termina em @lid).
   waId: string;
-  send: (text: string) => Promise<void>;
+  send: SendText;
   saveContact?: (name: string) => Promise<void>;
   settings: CompanySettings;
   clientId: string | null;
@@ -72,9 +76,13 @@ export type IncomingWhatsAppMessage = {
   // Áudio recebido: baixado só se a transcrição estiver ligada.
   audio?: { seconds: number; mimetype: string; load: () => Promise<Buffer> };
   profileName?: string;
-  send: (text: string) => Promise<void>;
+  send: SendText;
   // Salva o cliente nos contatos do WhatsApp da empresa.
   saveContact?: (name: string) => Promise<void>;
+  // API oficial: marca como lida e mostra "digitando..." (só quando o bot vai responder).
+  typing?: () => Promise<void>;
+  // Simulador (whatsapp.simulator.ts): fluxo ainda não salvo, bot ligado etc.
+  settingsOverride?: Partial<CompanySettings>;
 };
 
 // Cliente parou no meio do agendamento: depois desse tempo começa do zero.
@@ -97,7 +105,7 @@ const PLACEHOLDER_PREFIX = 'Cliente WhatsApp';
 const MENU_KEYWORDS: [FlowAction, RegExp][] = [
   ['meus', /remarc|cancel|desmarc|meu horario|meus horarios|meu agendamento|meus agendamentos|confirm/],
   ['agendar', /agend|marcar|horario/],
-  ['servicos', /servico|preco|valor|quanto|tabela/],
+  ['servicos', /servico|produto|preco|valor|quanto|tabela/],
   ['equipe', /atend|equipe|falar|pessoa|humano/],
 ];
 
@@ -354,8 +362,8 @@ export async function logMessage(companyId: string, clientId: string | null, tex
 }
 
 async function say(ctx: BotContext, text: string) {
-  await ctx.send(text);
-  await logMessage(ctx.companyId, ctx.clientId, text, MessageSender.BOT);
+  const sent = await ctx.send(text);
+  await logMessage(ctx.companyId, ctx.clientId, sent || text, MessageSender.BOT);
 }
 
 async function upsertSession(companyId: string, phone: string, step: BotStep, data: SessionData) {
@@ -378,8 +386,14 @@ async function saveContact(ctx: BotContext, name: string) {
   await ctx.saveContact(name).catch((err) => console.error('Não foi possível salvar o contato no WhatsApp:', err));
 }
 
+// Serviços com horário: os únicos que o bot agenda.
 async function activeServices(companyId: string) {
-  return prisma.service.findMany({ where: { companyId, active: true }, orderBy: [{ position: 'asc' }, { name: 'asc' }] });
+  return prisma.service.findMany({ where: { companyId, active: true, kind: ServiceKind.SERVICE }, orderBy: [{ position: 'asc' }, { name: 'asc' }] });
+}
+
+// Produtos de pronta entrega: aparecem no catálogo e a compra é feita com a equipe.
+async function activeProducts(companyId: string) {
+  return prisma.service.findMany({ where: { companyId, active: true, kind: ServiceKind.PRODUCT }, orderBy: [{ position: 'asc' }, { name: 'asc' }] });
 }
 
 // Começo de conversa: boas-vindas e menu principal do fluxo.
@@ -436,7 +450,7 @@ export async function humanState(companyId: string, contactId: string) {
 
 // Chamado periodicamente (whatsapp.jobs.ts). Se a equipe ficou sem escrever
 // além do prazo, avisa o cliente que o atendimento terminou.
-export async function endIdleHumanSession(companyId: string, contactId: string, send: (text: string) => Promise<void>): Promise<boolean> {
+export async function endIdleHumanSession(companyId: string, contactId: string, send: SendText): Promise<boolean> {
   let ended = false;
   await withContactLock(companyId, contactId, async () => {
     const [session, settings] = await Promise.all([
@@ -470,7 +484,7 @@ export async function handleIncomingMessage(message: IncomingWhatsAppMessage): P
     waId: message.contactId,
     send: message.send,
     saveContact: message.saveContact,
-    settings: company.settings,
+    settings: { ...company.settings, ...message.settingsOverride },
     clientId: null,
     ai: hasAi(company.account),
   };
@@ -509,7 +523,7 @@ function reminderNote(settings: CompanySettings, date: string, time: string): st
 }
 
 // Lembretes (chamados por whatsapp.jobs.ts, dentro do lock do contato).
-export async function sendDayBeforeReminder(settings: CompanySettings, companyName: string, appointment: FullAppointment, send: (text: string) => Promise<void>) {
+export async function sendDayBeforeReminder(settings: CompanySettings, companyName: string, appointment: FullAppointment, send: SendText) {
   const ctx: BotContext = { companyId: appointment.companyId, companyName, waId: appointment.client.whatsappId!, send, settings, clientId: appointment.clientId };
   await say(ctx, blocks(fillTemplate(settings.reminderMessage, appointmentVars(appointment, companyName)), CONFIRM_OPTIONS));
   await prisma.appointment.update({ where: { id: appointment.id }, data: { reminderSentAt: new Date() } });
@@ -517,7 +531,7 @@ export async function sendDayBeforeReminder(settings: CompanySettings, companyNa
 }
 
 // Pouco antes do horário: avisa e, se o cliente ainda não confirmou, pede confirmação.
-export async function sendHourReminder(settings: CompanySettings, companyName: string, appointment: FullAppointment, send: (text: string) => Promise<void>) {
+export async function sendHourReminder(settings: CompanySettings, companyName: string, appointment: FullAppointment, send: SendText) {
   const ctx: BotContext = { companyId: appointment.companyId, companyName, waId: appointment.client.whatsappId!, send, settings, clientId: appointment.clientId };
   const text = fillTemplate(settings.hourReminderMessage, appointmentVars(appointment, companyName));
   const askConfirmation = !appointment.confirmedAt;
@@ -567,6 +581,8 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
   }
 
   if (!settings.botEnabled) return;
+  // Com a equipe atendendo, a mensagem fica como não lida para ela ver.
+  if (session?.step !== 'HUMAN') message.typing?.().catch(() => {});
 
   const name = firstName(isPlaceholderName(client?.name) ? profileName : client?.name);
   if (!session) {
@@ -607,6 +623,11 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
     // Submenu removido do fluxo enquanto o cliente estava nele: usa o principal.
     const found = findNode(root, data.nodeId);
     const menu = found?.node.type === 'menu' ? found.node : root;
+    // "comprar", "quero comprar a pomada": produtos de pronta entrega (a equipe finaliza).
+    if (/\bcompr/.test(answer)) {
+      await offerProducts(ctx, data, text);
+      return;
+    }
     const option = pickMenuOption(answer, menu);
     if (option) {
       await runNode(ctx, option, menu, data, name);
@@ -656,6 +677,18 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
     const duration = chosen.reduce((sum, s) => sum + s.durationMinutes, 0);
     const total = chosen.length > 1 ? ` Os ${chosen.length} serviços levam cerca de ${durationLabel(duration)} no total.` : '';
     await scheduleWish(ctx, { ...data, wish, serviceIds: chosen.map((s) => s.id) }, `Perfeito, ${chosen.map((s) => s.name).join(' + ')}!${total}`);
+    return;
+  }
+
+  if (step === 'ASK_PRODUCT') {
+    const products = await activeProducts(ctx.companyId);
+    const named = productsInText(text, products);
+    const chosen = pickServices(text, products) ?? (named.length ? named : null);
+    if (!chosen) {
+      await say(ctx, blocks('Não encontrei esse produto.', productQuestion(products)));
+      return;
+    }
+    await buyProducts(ctx, chosen);
     return;
   }
 
@@ -746,6 +779,7 @@ async function aiUnderstand(ctx: BotContext, question: string, options: string[]
     settings: ctx.settings,
     flow: flowOf(ctx),
     services: services ?? await activeServices(ctx.companyId),
+    products: await activeProducts(ctx.companyId),
     question,
     options,
     text,
@@ -865,19 +899,67 @@ async function durationOf(ctx: BotContext, data: SessionData) {
   return services.reduce((sum, s) => sum + s.durationMinutes, 0) || ctx.settings.slotMinutes;
 }
 
+const priceOf = (s: Service) => (s.priceCents ? money(s.priceCents) : 'valor sob consulta');
+
 async function showCatalog(ctx: BotContext, data: SessionData, prefix?: string) {
-  const services = await activeServices(ctx.companyId);
+  const [services, products] = await Promise.all([activeServices(ctx.companyId), activeProducts(ctx.companyId)]);
   await setSession(ctx, 'MENU', { askName: data.askName, idle: true });
-  if (!services.length) {
+  if (!services.length && !products.length) {
     await say(ctx, blocks(prefix, 'Ainda não temos serviços cadastrados por aqui.', mainMenu(ctx)));
     return;
   }
-  const list = services.map((s) => {
-    const price = s.priceCents ? money(s.priceCents) : 'valor sob consulta';
-    return `• ${s.name}: ${price} (${durationLabel(s.durationMinutes)})${s.description ? `\n   ${s.description}` : ''}`;
-  }).join('\n');
+  const describe = (s: Service, extra = '') => `• ${s.name}: ${priceOf(s)}${extra}${s.description ? `\n   ${s.description}` : ''}`;
   const bookOption = (flowOf(ctx).options ?? []).findIndex((o) => o.action === 'agendar');
-  await say(ctx, blocks(prefix, 'Nossos serviços:', list, bookOption >= 0 && `Para agendar, responda ${bookOption + 1}.`, mainMenu(ctx)));
+  await say(ctx, blocks(
+    prefix,
+    services.length > 0 && `Nossos serviços:\n${services.map((s) => describe(s, ` (${durationLabel(s.durationMinutes)})`)).join('\n')}`,
+    products.length > 0 && `Produtos à venda:\n${products.map((p) => describe(p)).join('\n')}`,
+    services.length > 0 && bookOption >= 0 && `Para agendar, responda ${bookOption + 1}.`,
+    products.length > 0 && 'Quer comprar um produto? Responda *comprar*.',
+    mainMenu(ctx),
+  ));
+}
+
+// ---------- Compra de produtos (a equipe finaliza pela conversa) ----------
+
+function productQuestion(products: Service[]): string {
+  return blocks(
+    'Qual produto você quer? Responda com o número:',
+    numbered(products.map((p) => `${p.name} (${priceOf(p)})`)),
+    products.length > 1 && 'Quer mais de um? Mande os números juntos, por exemplo: 1,2.',
+    BACK_OPTION,
+  );
+}
+
+// Produtos citados pelo nome na mensagem ("quero comprar a pomada").
+function productsInText(text: string, products: Service[]): Service[] {
+  const answer = normalize(text);
+  return products.filter((p) => normalize(p.name).length >= 3 && answer.includes(normalize(p.name)));
+}
+
+async function buyProducts(ctx: BotContext, chosen: Service[]) {
+  const total = chosen.reduce((sum, p) => sum + p.priceCents, 0);
+  const names = chosen.map((p) => p.name).join(' + ');
+  await handOff(ctx, `Ótimo! Vou chamar a equipe para finalizar a compra: *${names}*${total ? ` (${money(total)})` : ''}.`);
+}
+
+async function offerProducts(ctx: BotContext, data: SessionData, text: string) {
+  const products = await activeProducts(ctx.companyId);
+  if (!products.length) {
+    await say(ctx, blocks('Ainda não temos produtos à venda por aqui.', mainMenu(ctx)));
+    return;
+  }
+  const named = productsInText(text, products);
+  if (named.length) {
+    await buyProducts(ctx, named);
+    return;
+  }
+  if (products.length === 1) {
+    await buyProducts(ctx, products);
+    return;
+  }
+  await setSession(ctx, 'ASK_PRODUCT', { askName: data.askName });
+  await say(ctx, productQuestion(products));
 }
 
 async function offerServices(ctx: BotContext, data: SessionData, prefix: string) {

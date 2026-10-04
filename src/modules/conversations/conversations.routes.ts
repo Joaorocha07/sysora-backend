@@ -8,7 +8,8 @@ import { authenticate, companyOf, requireCompany } from '../../middlewares/auth.
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { humanState, logMessage, pauseBotForStaff } from '../whatsapp/whatsapp.bot';
-import { sendText } from '../whatsapp/whatsapp.connection';
+import { customerWindowEndsAt, customerWindowOpen, getCloudAccount, HIDDEN_NUMBER_ERROR } from '../whatsapp/whatsapp.cloud';
+import { sendText } from '../whatsapp/whatsapp.transport';
 
 // Caixa de conversas do WhatsApp: a equipe acompanha o que o bot conversou e
 // assume o atendimento quando precisa (o bot pausa com aquele cliente).
@@ -59,7 +60,16 @@ conversationsRouter.get('/:clientId', asyncHandler(async (req: Request, res: Res
     client.whatsappId ? humanState(companyId, client.whatsappId) : NOT_PAUSED,
   ]);
   if (client.unreadCount) await prisma.client.update({ where: { id: client.id }, data: { unreadCount: 0 } });
-  return res.json({ client: { ...client, unreadCount: 0 }, messages: messages.reverse(), bot });
+  // API oficial: a equipe só pode escrever até 24 h depois da última mensagem do cliente.
+  const official = Boolean(await getCloudAccount(companyId));
+  const windowEndsAt = official ? await customerWindowEndsAt(companyId, client.id) : null;
+  const channel = {
+    official,
+    windowEndsAt,
+    canReply: Boolean(client.whatsappId) && (!official || (Boolean(windowEndsAt && windowEndsAt.getTime() > Date.now()) && !client.whatsappId!.includes('@'))),
+    hiddenNumber: official && Boolean(client.whatsappId?.includes('@')),
+  };
+  return res.json({ client: { ...client, unreadCount: 0 }, messages: messages.reverse(), bot, channel });
 }));
 
 conversationsRouter.post('/:clientId/reply', validate(replySchema), asyncHandler(async (req: Request, res: Response) => {
@@ -67,6 +77,13 @@ conversationsRouter.post('/:clientId/reply', validate(replySchema), asyncHandler
   const client = await findClient(companyId, req.params.clientId);
   if (!client.whatsappId) throw HttpError.badRequest('Este cliente não tem um WhatsApp vinculado.');
 
+  // A API oficial só envia para números e só aceita texto livre até 24 h depois da última mensagem do cliente.
+  if (await getCloudAccount(companyId)) {
+    if (client.whatsappId.includes('@')) throw HttpError.badRequest(HIDDEN_NUMBER_ERROR);
+    if (!(await customerWindowOpen(companyId, client.id))) {
+      throw HttpError.badRequest('Pelo WhatsApp oficial só dá para responder até 24 horas depois da última mensagem do cliente. Quando ele escrever de novo, você pode responder por aqui.');
+    }
+  }
   const user = await prisma.user.findUniqueOrThrow({ where: { id: req.auth!.userId }, select: { name: true } });
   await sendText(companyId, client.whatsappId, req.body.text);
   await pauseBotForStaff(companyId, client.whatsappId);

@@ -17,7 +17,7 @@ import {
   verifyPreAuthToken,
 } from '../../lib/jwt';
 
-// Sessões do Sysora:
+// Sessões da Sysora:
 // - Admin master (User.isSuperAdmin): entra no painel master (sem empresa) e
 //   pode abrir qualquer empresa ativa como administrador.
 // - Admin/funcionário: entra direto na empresa; se tiver acesso a mais de
@@ -57,7 +57,7 @@ async function resolveAccess(userId: string, companyId: string | null) {
 
   if (user.isSuperAdmin) return { user, company, role: Role.ADMIN };
 
-  if (!company.active) throw HttpError.forbidden('Esta empresa está desativada. Fale com o suporte do Sysora.');
+  if (!company.active) throw HttpError.forbidden('Esta empresa está desativada. Fale com o suporte da Sysora.');
   const membership = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId, companyId } } });
   if (!membership || !membership.active) throw HttpError.forbidden('Você não tem acesso a esta empresa.');
   if (membership.status === MembershipStatus.PENDING) throw HttpError.forbidden('Seu acesso a esta empresa ainda aguarda a aprovação do administrador.');
@@ -307,7 +307,7 @@ function resolveCredentials(input: Credentials): {
 export async function registerCompany(input: Credentials & { companyName: string; name: string; phone?: string | null; plan: Plan }) {
   const { email, password, google } = resolveCredentials(input);
   if (await prisma.user.findUnique({ where: { email } })) {
-    throw HttpError.conflict('Este e-mail já tem uma conta no Sysora. Entre com ele ou use outro e-mail.');
+    throw HttpError.conflict('Este e-mail já tem uma conta na Sysora. Entre com ele ou use outro e-mail.');
   }
 
   const [slug, inviteCode, passwordHash] = await Promise.all([
@@ -361,8 +361,8 @@ export async function registerEmployee(input: Credentials & { inviteCode: string
     // dela. Pelo Google o e-mail já foi confirmado.
     if (user.isSuperAdmin || (!google && !(await comparePassword(password, user.passwordHash)))) {
       throw HttpError.conflict(user.googleLinkedAt
-        ? 'Este e-mail já tem uma conta no Sysora criada com o Google. Use o botão "Cadastrar com Google" para pedir acesso a esta empresa.'
-        : 'Este e-mail já tem uma conta no Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
+        ? 'Este e-mail já tem uma conta na Sysora criada com o Google. Use o botão "Cadastrar com Google" para pedir acesso a esta empresa.'
+        : 'Este e-mail já tem uma conta na Sysora. Use a mesma senha dela para pedir acesso a esta empresa.');
     }
     const existing = await prisma.companyMembership.findUnique({ where: { userId_companyId: { userId: user.id, companyId: company.id } } });
     if (existing?.status === MembershipStatus.PENDING) throw HttpError.conflict('Você já pediu acesso a esta empresa. Aguarde a aprovação do administrador.');

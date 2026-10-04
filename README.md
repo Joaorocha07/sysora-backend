@@ -1,6 +1,6 @@
 # Sysora — Backend
 
-API do Sysora, um SaaS multiempresa de cadastro de clientes, serviços e agendamentos com um chatbot de WhatsApp conectado no estilo WhatsApp Web (QR Code).
+API da Sysora, um SaaS multiempresa de cadastro de clientes, serviços e agendamentos com um chatbot de WhatsApp conectado no estilo WhatsApp Web (QR Code).
 
 **Stack:** Node.js, Express, TypeScript, Prisma (PostgreSQL), Baileys (WhatsApp Web), Zod e JWT.
 
@@ -37,7 +37,7 @@ O plano pertence à **conta** (`Account`), não à empresa: no Avançado a mesma
 
 ## Login com Google (Supabase Auth)
 
-O frontend faz o OAuth do Google pelo Supabase Auth e envia o access token do Supabase para `POST /api/auth/google`. O backend confere o token com o Supabase (`SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY`), exige identidade Google com e-mail confirmado e emite a sessão do Sysora (a mesma do login por senha).
+O frontend faz o OAuth do Google pelo Supabase Auth e envia o access token do Supabase para `POST /api/auth/google`. O backend confere o token com o Supabase (`SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY`), exige identidade Google com e-mail confirmado e emite a sessão da Sysora (a mesma do login por senha).
 
 - E-mail já cadastrado: entra direto (ou escolhe a empresa, se tiver várias).
 - E-mail novo: responde `signup-required` com um `signupToken` (30 min). O cadastro (`/register` ou `/register-employee`) aceita `googleToken` no lugar de `email` + `password`.
@@ -72,7 +72,7 @@ Menu: **1) Agendar** (nome → serviços → dia → horário), **2) Meus agenda
 - Cadastra o cliente pela primeira mensagem e salva toda a conversa.
 - Oferece só horários livres: respeita dias e horário de funcionamento, almoço, duração somada dos serviços e atendimentos simultâneos.
 - Envia lembretes na véspera e pouco antes do horário, com confirmação por número.
-- Fica em silêncio quando a equipe responde (pelo Sysora ou pelo celular) e volta após o prazo configurado.
+- Fica em silêncio quando a equipe responde (pela Sysora ou pelo celular) e volta após o prazo configurado.
 
 Mensagens aceitam `{nome}`, `{empresa}`, `{servico}`, `{data}` e `{hora}`.
 

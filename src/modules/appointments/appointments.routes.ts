@@ -54,6 +54,7 @@ appointmentsRouter.get('/availability', validate(availabilityQuerySchema, 'query
   const companyId = companyOf(req);
   const query = req.query as z.infer<typeof availabilityQuerySchema>;
   const services = await appointmentsService.resolveServices(companyId, query.serviceIds.split(','));
+  appointmentsService.assertHasService(services);
   const duration = services.reduce((sum, s) => sum + s.durationMinutes, 0);
   const times = await freeTimes(companyId, await getSettings(companyId), query.date, duration, query.excludeId);
   return res.json({ times, duration });

@@ -28,7 +28,7 @@ import { clearStoredSession, listCompaniesWithSession, useDatabaseAuthState } fr
 import { handleIncomingMessage, handleMessageFromPhone } from './whatsapp.bot';
 
 // Conexão de cada empresa com o WhatsApp Web (Baileys). O administrador lê o
-// QR Code na tela do Sysora e o servidor passa a funcionar como um "aparelho
+// QR Code na tela da Sysora e o servidor passa a funcionar como um "aparelho
 // conectado" daquele número. As conexões vivem na memória deste processo:
 // rode apenas UMA instância do backend por banco, senão as duas disputam a
 // mesma sessão.
@@ -143,7 +143,7 @@ function toJid(contact: string): string {
 function requireSocket(companyId: string): WASocket {
   const conn = connections.get(companyId);
   if (!conn?.sock || conn.status !== 'connected') {
-    throw HttpError.badRequest('O WhatsApp não está conectado. Conecte o número na tela WhatsApp do Sysora.');
+    throw HttpError.badRequest('O WhatsApp não está conectado. Conecte o número na tela WhatsApp da Sysora.');
   }
   return conn.sock;
 }

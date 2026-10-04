@@ -36,6 +36,9 @@ export const signupRateLimiter = rateLimit({
 export const apiRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 300,
+  // O webhook do WhatsApp oficial chega dos servidores da Meta com as mensagens
+  // de todas as empresas (e é autenticado pela assinatura).
+  skip: (req) => req.originalUrl.startsWith('/api/webhooks/whatsapp'),
   standardHeaders: true,
   legacyHeaders: false,
   message: tooMany('Muitas requisições. Tente novamente em instantes.'),

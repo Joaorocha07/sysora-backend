@@ -124,7 +124,7 @@ async function companyContext(companyId: string): Promise<string> {
   });
   const s = company.settings;
   const services = company.services.length
-    ? company.services.map((sv) => `- ${sv.name}: ${money(sv.priceCents)}, ${sv.durationMinutes} min${sv.description ? ` (${sv.description})` : ''}`).join('\n')
+    ? company.services.map((sv) => `- ${sv.name}: ${money(sv.priceCents)}, ${sv.kind === 'PRODUCT' ? 'produto de pronta entrega (não é agendado)' : `${sv.durationMinutes} min`}${sv.description ? ` (${sv.description})` : ''}`).join('\n')
     : '- (nenhum serviço cadastrado ainda)';
   const hours = s
     ? `${s.workDays.map((d) => WEEKDAYS[d]).join(', ')}, das ${s.openingTime} às ${s.closingTime}${s.lunchEnabled ? `, com intervalo das ${s.lunchStart} às ${s.lunchEnd}` : ''}`
@@ -137,7 +137,7 @@ async function companyContext(companyId: string): Promise<string> {
   ].filter(Boolean).join('\n\n');
 }
 
-const INSTRUCTIONS = `Você é a Sora, assistente do Sysora (sistema de agendamento com bot de WhatsApp). Você ajuda o dono da empresa a montar o fluxo de menus do bot conversando com ele em português do Brasil, de forma simpática e direta.
+const INSTRUCTIONS = `Você é a Sora, assistente da Sysora (sistema de agendamento com bot de WhatsApp). Você ajuda o dono da empresa a montar o fluxo de menus do bot conversando com ele em português do Brasil, de forma simpática e direta.
 
 Como o fluxo funciona:
 - É uma árvore. A etapa inicial (parentId null) é sempre do tipo "menu": envia as mensagens de boas-vindas e mostra as opções numeradas.

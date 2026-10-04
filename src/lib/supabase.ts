@@ -4,7 +4,7 @@ import { HttpError } from './httpError';
 
 // O Supabase só é usado para o login com Google: o frontend faz o OAuth pelo
 // Supabase Auth e manda o access token dele; aqui conferimos esse token com o
-// Supabase e o backend emite a sessão própria do Sysora.
+// Supabase e o backend emite a sessão própria da Sysora.
 let client: SupabaseClient | null = null;
 
 export const isGoogleLoginEnabled = () => Boolean(env.SUPABASE_URL && env.SUPABASE_PUBLISHABLE_KEY);
@@ -25,7 +25,7 @@ export async function verifyGoogleAccessToken(accessToken: string): Promise<Goog
 
   const user: SupabaseUser = data.user;
   // Só aceita e-mail confirmado pelo próprio Google: uma conta de e-mail/senha
-  // do Supabase com o mesmo endereço não serve para entrar no Sysora.
+  // do Supabase com o mesmo endereço não serve para entrar na Sysora.
   const fromGoogle = user.identities?.some((identity) => identity.provider === 'google');
   if (!fromGoogle || !user.email || !user.email_confirmed_at) {
     throw HttpError.unauthorized('Não foi possível confirmar o seu e-mail com o Google.');

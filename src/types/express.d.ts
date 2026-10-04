@@ -9,6 +9,8 @@ declare global {
         role: Role | null;
         isSuperAdmin: boolean;
       };
+      // Corpo original, guardado só no webhook do WhatsApp para conferir a assinatura da Meta.
+      rawBody?: Buffer;
     }
   }
 }

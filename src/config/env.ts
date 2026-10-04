@@ -2,6 +2,8 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const bool = (fallback: 'true' | 'false') => z.string().default(fallback).transform((value) => value === 'true');
+// Variável opcional: vazia no .env (ex.: META_APP_ID=) vale como não definida.
+const optionalText = () => z.string().optional().transform((value) => value?.trim() || undefined);
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL é obrigatório'),
@@ -26,6 +28,28 @@ const schema = z.object({
   // Conexão com o WhatsApp Web. Desligue em cópias locais que usam o mesmo
   // banco da produção, para não disputarem a sessão do WhatsApp.
   WHATSAPP_ENABLED: bool('true'),
+
+  // API oficial do WhatsApp (Cloud API da Meta), conectada pelo cadastro
+  // incorporado (Embedded Signup). Sem META_APP_ID, META_APP_SECRET e
+  // META_CONFIG_ID a opção oficial aparece desativada e só o QR Code funciona.
+  // Ver whatsapp.cloud.ts.
+  META_APP_ID: optionalText(),
+  META_APP_SECRET: optionalText(),
+  META_CONFIG_ID: optionalText(),
+  // Texto qualquer, igual ao "Verify token" do webhook no painel do app da Meta.
+  META_WEBHOOK_VERIFY_TOKEN: optionalText(),
+  META_GRAPH_VERSION: z.string().default('v25.0'),
+  // Endereço público deste backend (https), para montar a URL do webhook que
+  // vai no app da Meta de cada empresa na conexão manual. Vazio: usa o
+  // endereço pelo qual a requisição chegou.
+  PUBLIC_API_URL: z.string().url('PUBLIC_API_URL inválida').optional().or(z.literal('').transform(() => undefined)),
+  // Preços da Meta no Brasil (R$ por mensagem) e cota grátis de mensagens de
+  // atendimento por número por mês, só para a estimativa de custo na tela.
+  WHATSAPP_FREE_SERVICE_MONTHLY: z.coerce.number().int().nonnegative().default(1000),
+  WHATSAPP_PRICE_SERVICE_BRL: z.coerce.number().nonnegative().default(0.035),
+  WHATSAPP_PRICE_UTILITY_BRL: z.coerce.number().nonnegative().default(0.035),
+  WHATSAPP_PRICE_AUTHENTICATION_BRL: z.coerce.number().nonnegative().default(0.035),
+  WHATSAPP_PRICE_MARKETING_BRL: z.coerce.number().nonnegative().default(0.3217),
 
   // O cadastro público de empresas é ligado/desligado pelo admin master no
   // painel (tabela platform_settings). MASTER_* e SEED_DEMO só valem para o

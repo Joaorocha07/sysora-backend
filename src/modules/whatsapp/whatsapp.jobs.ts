@@ -4,8 +4,9 @@ import { prisma } from '../../lib/prisma';
 import { addDays, dateTime, pad, toIsoDate } from '../../lib/time';
 import { appointmentInclude, AppointmentWithRelations } from '../appointments/appointments.service';
 import { ACTIVE_STATUSES } from '../appointments/availability';
-import { endIdleHumanSession, humanSessionEndsAt, sendDayBeforeReminder, sendHourReminder, withContactLock } from './whatsapp.bot';
-import { isConnected, sendText } from './whatsapp.connection';
+import { endIdleHumanSession, humanSessionEndsAt, SendText, sendDayBeforeReminder, sendHourReminder, withContactLock } from './whatsapp.bot';
+import { customerWindowOpen, getCloudAccount, sendReminderTemplate, templateApproved } from './whatsapp.cloud';
+import { isReady, sendText } from './whatsapp.transport';
 
 // Tarefas periódicas do bot:
 // - Lembretes dos agendamentos:
@@ -53,7 +54,8 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
     });
 
     for (const settings of companies) {
-      if (!isConnected(settings.companyId) || !isAccountActive(settings.company.account)) continue;
+      if (!(await isReady(settings.companyId)) || !isAccountActive(settings.company.account)) continue;
+      const cloudAccount = await getCloudAccount(settings.companyId);
       const appointments = await prisma.appointment.findMany({
         where: {
           companyId: settings.companyId,
@@ -73,7 +75,15 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
             const appointment = await prisma.appointment.findUnique({ where: { id: candidate.id }, include: appointmentInclude });
             const kind = appointment && dueReminder(appointment, settings, new Date());
             if (!appointment || !kind) return;
-            const send = (text: string) => sendText(settings.companyId, appointment.client.whatsappId!, text);
+            let send: SendText = (text) => sendText(settings.companyId, appointment.client.whatsappId!, text);
+            // API oficial: sem conversa nas últimas 24 h, o lembrete só sai como
+            // template aprovado. Ainda em análise na Meta: tenta de novo no próximo ciclo.
+            // Cliente da conexão antiga sem número visível (@lid): a API oficial não alcança.
+            if (cloudAccount && appointment.client.whatsappId!.includes('@')) return;
+            if (cloudAccount && !(await customerWindowOpen(settings.companyId, appointment.clientId))) {
+              if (!templateApproved(cloudAccount, kind)) return;
+              send = () => sendReminderTemplate(settings.companyId, kind, appointment, settings.company.name);
+            }
             if (kind === 'hour') await sendHourReminder(settings, settings.company.name, appointment, send);
             else await sendDayBeforeReminder(settings, settings.company.name, appointment, send);
             sent += 1;
@@ -103,7 +113,7 @@ export async function closeIdleHandoffs(): Promise<number> {
     });
     for (const session of sessions) {
       const settings = session.company.settings;
-      if (!settings || !isConnected(session.companyId)) continue;
+      if (!settings || !(await isReady(session.companyId))) continue;
       if (humanSessionEndsAt(session, settings).endsAt.getTime() > Date.now()) continue;
       try {
         if (await endIdleHumanSession(session.companyId, session.phone, (text) => sendText(session.companyId, session.phone, text))) ended += 1;

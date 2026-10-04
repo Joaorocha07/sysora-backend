@@ -17,6 +17,7 @@ import { servicesRouter } from './modules/services/services.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
 import { usersRouter } from './modules/users/users.routes';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.routes';
+import { surveyRouter } from './modules/survey/survey.routes';
 import { webhooksRouter } from './modules/webhooks/webhooks.routes';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes';
 
@@ -33,7 +34,12 @@ app.use(cors({
     || (env.NODE_ENV === 'development' && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin))),
   credentials: true,
 }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({
+  limit: '1mb',
+  verify: (req, _res, buf) => {
+    if ((req as express.Request).originalUrl?.startsWith('/api/webhooks/whatsapp')) (req as express.Request).rawBody = buf;
+  },
+}));
 app.use(cookieParser());
 app.use(morgan(env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 app.use(apiRateLimiter);
@@ -51,6 +57,7 @@ app.use('/api/conversations', conversationsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
+app.use('/api/survey', surveyRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
 

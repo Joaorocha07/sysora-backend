@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { Role } from '@prisma/client';
+import { Role, ServiceKind } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
 import { HttpError } from '../../lib/httpError';
@@ -9,17 +9,30 @@ import { requireActiveSubscription } from '../../middlewares/subscription.middle
 import { validate } from '../../middlewares/validate.middleware';
 import { improveDescription } from './services.ai';
 
-// Catálogo de serviços da empresa. O bot oferece os serviços ativos, na
-// ordem de `position`.
+// Catálogo da empresa: serviços com horário (o bot oferece os ativos para
+// agendar, na ordem de `position`) e produtos de pronta entrega (sem duração:
+// aparecem no catálogo do bot, entram junto num agendamento ou a equipe vende
+// pela conversa).
 
 const serviceSchema = z.object({
-  name: z.string().trim().min(1, 'Informe o nome do serviço.').max(60, 'Nome muito longo.'),
+  kind: z.nativeEnum(ServiceKind).optional(),
+  name: z.string().trim().min(1, 'Informe o nome.').max(60, 'Nome muito longo.'),
   description: z.string().trim().max(300).nullish(),
-  durationMinutes: z.number().int().min(5, 'Duração mínima de 5 minutos.').max(600, 'Duração máxima de 10 horas.'),
+  // Produto: ignorado (fica 0). Serviço: mínimo de 5 minutos (conferido em withDuration).
+  durationMinutes: z.number().int().min(0).max(600, 'Duração máxima de 10 horas.').optional(),
   priceCents: z.number().int().min(0, 'Preço inválido.').max(100_000_000),
   active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
 });
+
+// Produto não ocupa horário; serviço precisa de uma duração de verdade.
+function withDuration<T extends { kind?: ServiceKind; durationMinutes?: number }>(body: T, current?: { kind: ServiceKind; durationMinutes: number }) {
+  const kind = body.kind ?? current?.kind ?? ServiceKind.SERVICE;
+  if (kind === ServiceKind.PRODUCT) return { ...body, kind, durationMinutes: 0 };
+  const duration = body.durationMinutes ?? current?.durationMinutes ?? 0;
+  if (duration < 5) throw HttpError.badRequest('Informe a duração do serviço (mínimo de 5 minutos).');
+  return { ...body, kind, durationMinutes: duration };
+}
 
 export const servicesRouter = Router();
 
@@ -36,10 +49,11 @@ servicesRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
 
 // "Melhorar com IA" no formulário do serviço (ainda não salvo): devolve o texto sugerido.
 const improveSchema = z.object({
-  name: z.string().trim().min(1, 'Informe o nome do serviço antes de usar a IA.').max(60),
+  kind: z.nativeEnum(ServiceKind).optional(),
+  name: z.string().trim().min(1, 'Informe o nome antes de usar a IA.').max(60),
   description: z.string().trim().max(300).nullish(),
   priceCents: z.number().int().min(0).max(100_000_000).optional(),
-  durationMinutes: z.number().int().min(1).max(600).optional(),
+  durationMinutes: z.number().int().min(0).max(600).optional(),
 });
 
 servicesRouter.post('/improve-description', requireRole(Role.ADMIN), validate(improveSchema), asyncHandler(async (req: Request, res: Response) => {
@@ -52,7 +66,7 @@ servicesRouter.post('/', requireRole(Role.ADMIN), validate(serviceSchema), async
   if (duplicate) throw HttpError.conflict('Já existe um serviço com esse nome.');
   const last = await prisma.service.aggregate({ where: { companyId }, _max: { position: true } });
   const service = await prisma.service.create({
-    data: { ...req.body, companyId, position: req.body.position ?? (last._max.position ?? -1) + 1 },
+    data: { ...withDuration(req.body), companyId, position: req.body.position ?? (last._max.position ?? -1) + 1 },
   });
   return res.status(201).json({ service });
 }));
@@ -67,7 +81,7 @@ servicesRouter.patch('/:id', requireRole(Role.ADMIN), validate(serviceSchema.par
     });
     if (duplicate) throw HttpError.conflict('Já existe um serviço com esse nome.');
   }
-  const service = await prisma.service.update({ where: { id: existing.id }, data: req.body });
+  const service = await prisma.service.update({ where: { id: existing.id }, data: withDuration(req.body, existing) });
   return res.json({ service });
 }));
 

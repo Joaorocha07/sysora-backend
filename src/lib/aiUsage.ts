@@ -1,7 +1,8 @@
 import { costMicros, type TokenUsage } from './aiPricing';
-import { prisma } from './prisma';
+import { prismaBase as prisma } from './prisma';
 
-// Registra uma chamada à IA para o painel master de gastos. Falha ao registrar
+// Registra uma chamada à IA para o painel master de gastos (grava mesmo dentro
+// do simulador do bot, cuja transação é desfeita: a chamada foi paga). Falha ao registrar
 // não derruba o pedido do usuário (a resposta da IA já foi paga).
 export async function recordAiUsage(companyId: string | null, feature: string, model: string, usage: TokenUsage) {
   await save(companyId, feature, model, {

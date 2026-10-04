@@ -43,6 +43,13 @@ enum MessageSender {
   STAFF
 }
 
+// Item do catálogo: serviço com horário (entra na agenda) ou produto de pronta
+// entrega (sem duração: vai junto num agendamento ou é vendido pela equipe).
+enum ServiceKind {
+  SERVICE
+  PRODUCT
+}
+
 // Planos pagos (limites e preços em src/lib/plans.ts).
 enum Plan {
   INICIAL
@@ -138,8 +145,11 @@ model Company {
   refreshTokens    RefreshToken[]
   whatsappSessions WhatsAppSession[]
   whatsappAuth     WhatsAppAuth[]
-  account          Account             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  whatsappCloud    WhatsAppCloudAccount?
+  whatsappUsage    WhatsAppUsage[]
+  account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
+  surveys          OnboardingSurvey[]
 
   @@index([accountId])
   @@map("companies")
@@ -162,12 +172,15 @@ model User {
   // Primeira vez que entrou com Google (nulo = só usa e-mail e senha).
   googleLinkedAt DateTime?
   lastLoginAt    DateTime?
+  // Pesquisa inicial: escolheu "Agora não" no convite (o painel segue lembrando).
+  surveyDismissedAt DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   memberships   CompanyMembership[]
   refreshTokens RefreshToken[]
   appointments  Appointment[]       @relation("AppointmentStaff")
+  survey        OnboardingSurvey?
 
   @@map("users")
 }
@@ -251,13 +264,16 @@ model Client {
   @@map("clients")
 }
 
-// Serviço oferecido pela empresa (ex.: corte, consulta, aula experimental).
+// Serviço oferecido pela empresa (ex.: corte, consulta, aula experimental) ou
+// produto de pronta entrega (ex.: pomada, shampoo), com preço e sem duração.
 model Service {
-  id              String   @id @default(uuid())
+  id              String      @id @default(uuid())
   companyId       String
+  kind            ServiceKind @default(SERVICE)
   name            String
   description     String?
-  durationMinutes Int      @default(60)
+  // Produtos: 0 (não ocupam horário na agenda).
+  durationMinutes Int         @default(60)
   // Preço em centavos, para não perder precisão.
   priceCents      Int      @default(0)
   active          Boolean  @default(true)
@@ -308,9 +324,10 @@ model Appointment {
 // Serviços de um agendamento. Guarda nome, duração e preço do momento da
 // marcação: mudar o catálogo depois não altera agendamentos antigos.
 model AppointmentItem {
-  id              String  @id @default(uuid())
+  id              String      @id @default(uuid())
   appointmentId   String
   serviceId       String?
+  kind            ServiceKind @default(SERVICE)
   name            String
   durationMinutes Int
   priceCents      Int
@@ -424,4 +441,87 @@ model WhatsAppAuth {
 
   @@id([companyId, key])
   @@map("whatsapp_auth")
+}
+
+// Número conectado pela API oficial do WhatsApp (Cloud API da Meta). Duas
+// formas: pelo cadastro incorporado (Embedded Signup, app do Sysora) ou
+// manual (manual = true: a empresa criou o próprio app na Meta e colou as
+// credenciais). A conta do WhatsApp (WABA) é do cliente e a Meta cobra as
+// mensagens direto dele (whatsapp.cloud.ts).
+model WhatsAppCloudAccount {
+  companyId     String    @id
+  wabaId        String
+  phoneNumberId String    @unique
+  businessId    String?
+  // Token do cliente (de integração ou de usuário do sistema), criptografado (lib/crypto.ts).
+  accessToken   String
+  manual        Boolean   @default(false)
+  // App da Meta do próprio cliente (conexão manual): o segredo, criptografado,
+  // confere a assinatura do webhook dele.
+  appId         String?
+  appSecret     String?
+  // Último webhook recebido e conferido, para a tela mostrar se está chegando.
+  lastWebhookAt DateTime?
+  // PIN da verificação em duas etapas definido no registro, criptografado.
+  pin           String?
+  displayPhone  String?
+  verifiedName  String?
+  // Número que continua no app WhatsApp Business do celular (coexistência).
+  coexistence   Boolean   @default(false)
+  // Situação dos templates dos lembretes na Meta: { nome: "APPROVED" | "PENDING" | "REJECTED" ... }.
+  templates     Json      @default("{}")
+  // Último erro de envio relevante (ex.: sem forma de pagamento na Meta).
+  lastError     String?
+  lastErrorAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("whatsapp_cloud_accounts")
+}
+
+// Mensagens entregues pela API oficial no mês (AAAA-MM), por categoria de
+// preço da Meta. billable = cobradas pela Meta (campo pricing do webhook).
+model WhatsAppUsage {
+  companyId              String
+  month                  String
+  serviceTotal           Int    @default(0)
+  serviceBillable        Int    @default(0)
+  utilityTotal           Int    @default(0)
+  utilityBillable        Int    @default(0)
+  marketingTotal         Int    @default(0)
+  marketingBillable      Int    @default(0)
+  authenticationTotal    Int    @default(0)
+  authenticationBillable Int    @default(0)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, month])
+  @@map("whatsapp_usage")
+}
+
+// Pesquisa inicial respondida pelo administrador (como conheceu o Sysora, ramo,
+// tamanho da equipe e o que espera de um sistema). Os valores são os ids das
+// opções da tela (frontend: lib/survey.ts); "Outro" vem no campo *Other.
+model OnboardingSurvey {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  companyId     String?
+  sources       String[]
+  sourceOther   String?
+  business      String
+  businessOther String?
+  teamSize      String
+  features      String[]
+  featuresOther String?
+  comment       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("onboarding_surveys")
 }

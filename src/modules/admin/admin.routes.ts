@@ -7,6 +7,7 @@ import { planCatalog } from '../../lib/plans';
 import { authenticate, requireSuperAdmin } from '../../middlewares/auth.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { email, password } from '../auth/auth.schema';
+import * as whatsappCloud from '../whatsapp/whatsapp.cloud';
 import * as adminService from './admin.service';
 
 const optionalText = z.string().trim().max(120).nullish();
@@ -47,6 +48,26 @@ const updateAccountSchema = z.object({
 export const adminRouter = Router();
 
 adminRouter.use(authenticate, requireSuperAdmin);
+
+// ============ WhatsApp oficial (app da Meta da Sysora) ============
+const requestBase = (req: Request) => `${req.protocol}://${req.get('host')}`;
+
+adminRouter.get('/whatsapp', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await whatsappCloud.platformSetup(requestBase(req)));
+}));
+
+adminRouter.post('/whatsapp/check', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await whatsappCloud.checkPlatform(requestBase(req)));
+}));
+
+// Pesquisa inicial: totais por resposta e as últimas respostas.
+adminRouter.get('/surveys', asyncHandler(async (_req: Request, res: Response) => {
+  return res.json(await adminService.surveySummary());
+}));
+
+adminRouter.post('/whatsapp/webhook', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await whatsappCloud.configurePlatformWebhook(requestBase(req)));
+}));
 
 adminRouter.get('/stats', asyncHandler(async (_req: Request, res: Response) => {
   return res.json(await adminService.stats());

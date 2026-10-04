@@ -53,7 +53,7 @@ export const signupConfig = asyncHandler(async (_req: Request, res: Response) =>
 
 export const registerCompany = asyncHandler(async (req: Request, res: Response) => {
   const { publicSignupEnabled } = await getPlatformSettings();
-  if (!publicSignupEnabled) throw HttpError.forbidden('O cadastro de novas empresas está fechado. Fale com a equipe do Sysora.');
+  if (!publicSignupEnabled) throw HttpError.forbidden('O cadastro de novas empresas está fechado. Fale com a equipe da Sysora.');
   return sessionResponse(res.status(201), await authService.registerCompany(req.body));
 });
 

@@ -8,7 +8,7 @@ import { PLANS, addMonth, isAccountActive, subscriptionSummary, trialEnd } from 
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
 import { env } from '../../config/env';
 import { getPlatformSettings } from '../../lib/platformSettings';
-import * as whatsappConnection from '../whatsapp/whatsapp.connection';
+import { disconnectAll as disconnectWhatsApp } from '../whatsapp/whatsapp.transport';
 
 // Painel do admin master: empresas, contas (assinaturas) e o administrador
 // inicial de cada empresa. A cobrança é feita fora do sistema: o master
@@ -45,7 +45,7 @@ export async function stats() {
   };
 }
 
-// Todas as pessoas cadastradas no Sysora, com as empresas e o papel em cada uma.
+// Todas as pessoas cadastradas na Sysora, com as empresas e o papel em cada uma.
 export async function listUsers() {
   const users = await prisma.user.findMany({
     orderBy: { createdAt: 'desc' },
@@ -150,7 +150,7 @@ export async function updateCompany(companyId: string, input: Partial<CompanyInp
   if (input.active === false) {
     // Empresa desativada: encerra as sessões e desliga o WhatsApp dela.
     await prisma.refreshToken.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: new Date() } });
-    await whatsappConnection.disconnect(companyId).catch(() => {});
+    await disconnectWhatsApp(companyId);
   }
   return updated;
 }
@@ -199,7 +199,7 @@ export async function registerPayment(accountId: string) {
 export async function deleteCompany(companyId: string) {
   const company = await prisma.company.findUnique({ where: { id: companyId } });
   if (!company) throw HttpError.notFound('Empresa não encontrada.');
-  await whatsappConnection.disconnect(companyId).catch(() => {});
+  await disconnectWhatsApp(companyId);
   await prisma.company.delete({ where: { id: companyId } });
   // Conta sem nenhuma empresa não tem mais o que cobrar.
   if ((await prisma.company.count({ where: { accountId: company.accountId } })) === 0) {
@@ -256,6 +256,45 @@ export async function aiUsageSummary() {
       outputTokens: r.outputTokens,
       costUsd: usd(r.costMicros),
       createdAt: r.createdAt,
+    })),
+  };
+}
+
+// ============ Pesquisa inicial ============
+
+export async function surveySummary() {
+  const surveys = await prisma.onboardingSurvey.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: { user: { select: { name: true, email: true } }, company: { select: { name: true } } },
+  });
+  const tally = (values: string[]) => Object.entries(values.reduce<Record<string, number>>((acc, v) => ({ ...acc, [v]: (acc[v] ?? 0) + 1 }), {}))
+    .map(([id, count]) => ({ id, count }))
+    .sort((a, b) => b.count - a.count);
+  const [users, dismissed] = await Promise.all([
+    prisma.user.count({ where: { isSuperAdmin: false, memberships: { some: { status: 'ACTIVE' } } } }),
+    prisma.user.count({ where: { surveyDismissedAt: { not: null }, survey: null } }),
+  ]);
+  return {
+    total: surveys.length,
+    users,
+    dismissed,
+    sources: tally(surveys.flatMap((s) => s.sources)),
+    business: tally(surveys.map((s) => s.business)),
+    teamSize: tally(surveys.map((s) => s.teamSize)),
+    features: tally(surveys.flatMap((s) => s.features)),
+    responses: surveys.slice(0, 100).map((s) => ({
+      id: s.id,
+      createdAt: s.createdAt,
+      user: s.user,
+      company: s.company?.name ?? null,
+      sources: s.sources,
+      sourceOther: s.sourceOther,
+      business: s.business,
+      businessOther: s.businessOther,
+      teamSize: s.teamSize,
+      features: s.features,
+      featuresOther: s.featuresOther,
+      comment: s.comment,
     })),
   };
 }

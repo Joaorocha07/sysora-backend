@@ -1,4 +1,4 @@
-import { AppointmentStatus, Prisma, Source } from '@prisma/client';
+import { AppointmentStatus, Prisma, ServiceKind, Source } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { dateTime, fromMinutes, toMinutes } from '../../lib/time';
@@ -46,6 +46,14 @@ export async function resolveServices(companyId: string, serviceIds: string[]) {
 }
 
 type Services = Awaited<ReturnType<typeof resolveServices>>;
+
+// O agendamento ocupa um horário: precisa de ao menos um serviço. Produtos
+// (pronta entrega, duração 0) só entram junto, somando no valor.
+export function assertHasService(services: { kind: ServiceKind }[]) {
+  if (!services.some((s) => s.kind === ServiceKind.SERVICE)) {
+    throw HttpError.badRequest('Escolha pelo menos um serviço com horário. Produtos entram junto com um serviço.');
+  }
+}
 const totalDuration = (services: Services) => services.reduce((sum, s) => sum + s.durationMinutes, 0);
 
 async function assertStaff(companyId: string, staffId: string | null | undefined) {
@@ -79,6 +87,7 @@ export async function createAppointment(companyId: string, input: CreateAppointm
   await assertStaff(companyId, input.staffId);
 
   const services = await resolveServices(companyId, input.serviceIds);
+  assertHasService(services);
   const duration = totalDuration(services);
   if (!input.ignoreConflicts) {
     const settings = await getSettings(companyId);
@@ -99,7 +108,7 @@ export async function createAppointment(companyId: string, input: CreateAppointm
       source,
       totalCents: services.reduce((sum, s) => sum + s.priceCents, 0),
       items: {
-        create: services.map((s) => ({ serviceId: s.id, name: s.name, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
+        create: services.map((s) => ({ serviceId: s.id, kind: s.kind, name: s.name, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
       },
     },
     include: appointmentInclude,
@@ -120,6 +129,7 @@ export async function updateAppointment(companyId: string, appointmentId: string
   if (moved) assertFuture(date, startTime);
 
   const services = input.serviceIds ? await resolveServices(companyId, input.serviceIds) : null;
+  if (services) assertHasService(services);
   const duration = services ? totalDuration(services) : current.items.reduce((sum, i) => sum + i.durationMinutes, 0);
 
   if ((moved || services) && !input.ignoreConflicts) {
@@ -143,7 +153,7 @@ export async function updateAppointment(companyId: string, appointmentId: string
             totalCents: services.reduce((sum, s) => sum + s.priceCents, 0),
             items: {
               deleteMany: {},
-              create: services.map((s) => ({ serviceId: s.id, name: s.name, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
+              create: services.map((s) => ({ serviceId: s.id, kind: s.kind, name: s.name, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
             },
           }
         : {}),

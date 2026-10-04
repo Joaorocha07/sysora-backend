@@ -38,7 +38,7 @@ export function passwordResetEmail(name: string, link: string, minutes: number) 
   const text = [
     hello,
     '',
-    'Recebemos um pedido para redefinir a senha da sua conta no Sysora.',
+    'Recebemos um pedido para redefinir a senha da sua conta na Sysora.',
     `Para criar uma nova senha, acesse o link abaixo (válido por ${minutes} minutos):`,
     '',
     link,

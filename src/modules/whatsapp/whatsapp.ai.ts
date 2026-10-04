@@ -4,7 +4,7 @@ import { CompanySettings, Service } from '@prisma/client';
 import * as z from 'zod/v4';
 import { env } from '../../config/env';
 import { recordAiUsage } from '../../lib/aiUsage';
-import { prisma } from '../../lib/prisma';
+import { prisma, prismaBase } from '../../lib/prisma';
 import { addDays, durationLabel, toIsoDate } from '../../lib/time';
 import { FlowNode } from './whatsapp.flow';
 
@@ -45,6 +45,8 @@ export type UnderstandInput = {
   settings: CompanySettings;
   flow: FlowNode;
   services: Service[];
+  // Produtos de pronta entrega: só para responder perguntas (não são agendados).
+  products?: Service[];
   // O que o bot tinha acabado de perguntar e as opções numeradas que mostrou.
   question: string;
   options: string[];
@@ -61,10 +63,11 @@ export async function botAiUsage(companyId: string) {
   return { used, limit: env.BOT_AI_MONTHLY_LIMIT, available: Boolean(env.ANTHROPIC_API_KEY) };
 }
 
+// Conta no limite do mês mesmo dentro do simulador do bot (prismaBase: fora da transação desfeita).
 export async function countUse(companyId: string) {
   const month = monthKey();
-  const settings = await prisma.companySettings.findUniqueOrThrow({ where: { companyId }, select: { botAiMonth: true } });
-  await prisma.companySettings.update({
+  const settings = await prismaBase.companySettings.findUniqueOrThrow({ where: { companyId }, select: { botAiMonth: true } });
+  await prismaBase.companySettings.update({
     where: { companyId },
     data: settings.botAiMonth === month ? { botAiCount: { increment: 1 } } : { botAiMonth: month, botAiCount: 1 },
   });
@@ -85,21 +88,21 @@ function flowInfo(flow: FlowNode): string {
   return lines.join('\n').slice(0, MAX_INFO);
 }
 
-const INSTRUCTIONS = `Você interpreta mensagens que clientes mandam no WhatsApp de uma empresa que usa o Sysora (agendamento com bot). O bot mostra opções numeradas, mas o cliente pode escrever do jeito dele, com erros de digitação, gírias ou em texto transcrito de áudio. Sua tarefa é transformar a mensagem em dados estruturados. Você não conversa com o cliente, exceto no campo "answer".
+const INSTRUCTIONS = `Você interpreta mensagens que clientes mandam no WhatsApp de uma empresa que usa a Sysora (agendamento com bot). O bot mostra opções numeradas, mas o cliente pode escrever do jeito dele, com erros de digitação, gírias ou em texto transcrito de áudio. Sua tarefa é transformar a mensagem em dados estruturados. Você não conversa com o cliente, exceto no campo "answer".
 
 Campos:
 - intent:
   - "opcao": o cliente escolheu uma das opções da lista mostrada (preencha "option").
   - "agendar": quer marcar um horário novo.
   - "meus": quer ver os horários que já marcou.
-  - "servicos": quer saber serviços, preços ou valores.
-  - "equipe": quer falar com uma pessoa/atendente.
+  - "servicos": quer saber serviços, produtos, preços ou valores.
+  - "equipe": quer falar com uma pessoa/atendente, ou quer comprar um produto (a equipe finaliza a compra).
   - "confirmar", "remarcar", "cancelar": sobre um horário já marcado.
   - "pergunta": fez uma pergunta que não é uma das opções (endereço, se aceita cartão, se abre domingo...).
   - "conversa": só cumprimentou, agradeceu ou se despediu.
   - "outro": não dá para entender.
 - option: número da opção da lista mostrada que corresponde ao pedido, ou null. Se a intenção for uma ação (agendar, meus, remarcar...) e existir uma opção na lista que faz isso, preencha também o número dela.
-- services: números (da lista de serviços) dos serviços citados. Vazio se não citou.
+- services: números (da lista de serviços) dos serviços citados. Vazio se não citou. Produtos não entram aqui: eles não são agendados.
 - date: dia pedido no formato AAAA-MM-DD, calculado a partir de "hoje" ("amanhã", "sexta", "dia 10", "semana que vem na terça"). null se não falou de dia. Nunca uma data passada.
 - time: horário pedido no formato HH:MM ("às 3 da tarde" = 15:00, "14h30" = 14:30). Se disse só um período ("de manhã", "à tarde"), use null.
 - answer: só para "pergunta". Responda em português do Brasil, em 1 ou 2 frases curtas e simpáticas, usando apenas as informações da empresa abaixo. Se a informação não estiver lá, diga que vai verificar com a equipe. Nunca invente preço, endereço, horário ou política. Para os outros intents, null.
@@ -116,13 +119,17 @@ function context(input: UnderstandInput): string {
   const services = input.services.length
     ? numbered(input.services.map((sv) => `${sv.name} (${sv.priceCents ? money(sv.priceCents) : 'valor sob consulta'}, ${durationLabel(sv.durationMinutes)})`))
     : '(nenhum serviço cadastrado)';
+  const products = input.products?.length
+    ? input.products.map((p) => `• ${p.name}: ${p.priceCents ? money(p.priceCents) : 'valor sob consulta'}${p.description ? ` (${p.description})` : ''}`).join('\n')
+    : null;
   const info = flowInfo(input.flow);
   return [
     `Hoje: ${WEEKDAYS[today.getDay()]}, ${toIsoDate(today)} (amanhã: ${toIsoDate(addDays(today, 1))}).`,
     `Empresa: ${input.companyName}`,
     `Atendimento: ${hours}`,
     `Serviços:\n${services}`,
-    info && `Informações da empresa:\n${info}`,
+    products && `Produtos à venda (pronta entrega, não são agendados):\n${products}`,
+    info &&`Informações da empresa:\n${info}`,
     `Última mensagem do bot: ${input.question}`,
     input.options.length ? `Opções mostradas:\n${numbered(input.options)}` : 'Nenhuma lista de opções foi mostrada.',
     `Mensagem do cliente: """${input.text.slice(0, MAX_TEXT)}"""`,
