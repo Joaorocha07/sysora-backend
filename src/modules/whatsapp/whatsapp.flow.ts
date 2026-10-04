@@ -10,7 +10,10 @@ import { z } from 'zod';
 // "together" junta as mensagens do nó (e o menu) num único balão; desligado,
 // cada uma vai separada. Sem fluxo salvo, vale o padrão (o menu clássico).
 
-export const FLOW_ACTIONS = ['agendar', 'meus', 'servicos', 'equipe'] as const;
+// 'codigo' e 'trocar' (códigos por e-mail) só funciona nas empresas liberadas pelo admin master
+// e fica fora do menu padrão.
+export const FLOW_ACTIONS = ['agendar', 'meus', 'servicos', 'equipe', 'codigo', 'trocar'] as const;
+const DEFAULT_ACTIONS: FlowAction[] = ['agendar', 'meus', 'servicos', 'equipe'];
 export type FlowAction = (typeof FLOW_ACTIONS)[number];
 export type FlowNodeType = 'menu' | 'message' | 'action' | 'end';
 
@@ -31,6 +34,8 @@ export const ACTION_LABELS: Record<FlowAction, string> = {
   meus: 'Meus agendamentos',
   servicos: 'Serviços e valores',
   equipe: 'Falar com a equipe',
+  codigo: 'Receber código de acesso',
+  trocar: 'Não consigo gerar imagem',
 };
 
 const MAX_OPTIONS = 9;
@@ -79,7 +84,7 @@ export function defaultFlow(settings: Pick<CompanySettings, 'greetingMessage'>):
     messages: [settings.greetingMessage],
     together: false,
     prompt: DEFAULT_PROMPT,
-    options: FLOW_ACTIONS.map((action) => ({ id: action, label: ACTION_LABELS[action], type: 'action', action, messages: [], together: true })),
+    options: DEFAULT_ACTIONS.map((action) => ({ id: action, label: ACTION_LABELS[action], type: 'action', action, messages: [], together: true })),
   };
 }
 

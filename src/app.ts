@@ -14,6 +14,7 @@ import { authRouter } from './modules/auth/auth.routes';
 import { clientsRouter } from './modules/clients/clients.routes';
 import { conversationsRouter } from './modules/conversations/conversations.routes';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes';
+import { emailCodesRouter } from './modules/emailCodes/emailCodes.routes';
 import { servicesRouter } from './modules/services/services.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
 import { usersRouter } from './modules/users/users.routes';
@@ -67,6 +68,7 @@ app.use('/api/survey', surveyRouter);
 app.use('/api/privacy', privacyRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
+app.use('/api/email-codes', emailCodesRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

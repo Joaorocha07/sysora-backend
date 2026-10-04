@@ -23,15 +23,19 @@ const serviceSchema = z.object({
   priceCents: z.number().int().min(0, 'Preço inválido.').max(100_000_000),
   active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
+  // Produto que é conta de acesso (códigos por e-mail). Vazio = produto comum.
+  accessEmail: z.string().trim().toLowerCase().email('E-mail de acesso inválido.').nullish().or(z.literal('')),
 });
 
 // Produto não ocupa horário; serviço precisa de uma duração de verdade.
 function withDuration<T extends { kind?: ServiceKind; durationMinutes?: number }>(body: T, current?: { kind: ServiceKind; durationMinutes: number }) {
   const kind = body.kind ?? current?.kind ?? ServiceKind.SERVICE;
-  if (kind === ServiceKind.PRODUCT) return { ...body, kind, durationMinutes: 0 };
+  const accessEmail = (body as { accessEmail?: string | null }).accessEmail;
+  const access = accessEmail === undefined ? {} : { accessEmail: kind === ServiceKind.PRODUCT && accessEmail ? accessEmail : null };
+  if (kind === ServiceKind.PRODUCT) return { ...body, ...access, kind, durationMinutes: 0 };
   const duration = body.durationMinutes ?? current?.durationMinutes ?? 0;
   if (duration < 5) throw HttpError.badRequest('Informe a duração do serviço (mínimo de 5 minutos).');
-  return { ...body, kind, durationMinutes: duration };
+  return { ...body, ...access, kind, durationMinutes: duration };
 }
 
 export const servicesRouter = Router();

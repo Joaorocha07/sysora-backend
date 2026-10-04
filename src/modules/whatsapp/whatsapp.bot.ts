@@ -9,7 +9,8 @@ import * as appointmentsService from '../appointments/appointments.service';
 import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availability';
 import { Understanding, understand } from './whatsapp.ai';
 import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
-import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent } from './whatsapp.safety';
+import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent, sleep, takeCodeRequest } from './whatsapp.safety';
+import { ACCESS_DAYS, accessProducts, codeForAccount, codesForClient, currentAccess, hasInboxFor, pickAnotherAccount, registerExpiry, switchAccess } from '../emailCodes/emailCodes.service';
 
 // Chatbot do WhatsApp. Toda mensagem recebida: encontra (ou cria) o cliente
 // pelo número, salva a mensagem na conversa dele e, se o bot estiver ligado,
@@ -29,7 +30,7 @@ import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent } from './whatsapp.safety';
 // direto se o horário estiver livre) ou responde uma pergunta com os dados da
 // empresa. Áudios são transcritos (lib/transcription.ts) e seguem igual.
 
-type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'ASK_PRODUCT' | 'HUMAN';
+type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'ASK_PRODUCT' | 'HUMAN' | 'ASK_ACCOUNT' | 'WAIT_CODE';
 type SessionData = {
   askName?: boolean;
   // MENU depois de concluir algo: o cliente pode escolher uma opção direto;
@@ -45,6 +46,11 @@ type SessionData = {
   manage?: ManageAction[];
   // Agendamento sendo remarcado (MANAGE/CONFIRM -> ASK_DATE).
   appointmentId?: string;
+  // WAIT_CODE (códigos por e-mail): conta do cliente e a espera pelo código
+  // (waitId identifica a espera atual).
+  accountId?: string;
+  waitId?: string;
+  codeSince?: string;
   // Dia/horário que o cliente já adiantou ("amanhã às 14h"), usados assim que o serviço for escolhido.
   wish?: { date?: string; time?: string };
   // HUMAN: última mensagem da equipe e quando o cliente pediu atendimento (ISO).
@@ -67,6 +73,8 @@ type BotContext = {
   clientId: string | null;
   // Plano com IA (Avançado pago): texto livre e áudio. Sem IA, só números e palavras-chave.
   ai?: boolean;
+  // Simulador ("Testar conversa"): não fica esperando e-mail chegar.
+  simulated?: boolean;
 };
 export type IncomingWhatsAppMessage = {
   companyId: string;
@@ -104,6 +112,8 @@ const PLACEHOLDER_PREFIX = 'Cliente WhatsApp';
 
 // Palavras que o cliente pode digitar em vez do número (opções com função pronta).
 const MENU_KEYWORDS: [FlowAction, RegExp][] = [
+  ['trocar', /imagem|trocar (de )?conta|outra conta|outro e-?mail/],
+  ['codigo', /codigo|code|chatgpt|\bgpt\b|token|verificacao/],
   ['meus', /remarc|cancel|desmarc|meu horario|meus horarios|meu agendamento|meus agendamentos|confirm/],
   ['agendar', /agend|marcar|horario/],
   ['servicos', /servico|produto|preco|valor|quanto|tabela/],
@@ -253,6 +263,10 @@ async function runNode(ctx: BotContext, node: FlowNode, parent: FlowNode | null,
     await showAppointments(ctx, base, prefix);
   } else if (node.action === 'servicos') {
     await showCatalog(ctx, base, prefix);
+  } else if (node.action === 'codigo') {
+    await deliverCode(ctx, base, prefix);
+  } else if (node.action === 'trocar') {
+    await switchAccount(ctx, base, prefix);
   } else {
     await handOff(ctx, prefix);
   }
@@ -488,6 +502,7 @@ export async function handleIncomingMessage(message: IncomingWhatsAppMessage): P
     settings: { ...company.settings, ...message.settingsOverride },
     clientId: null,
     ai: hasAi(company.account),
+    simulated: Boolean(message.settingsOverride),
   };
   await withContactLock(ctx.companyId, ctx.waId, () => processMessage(ctx, message));
 }
@@ -602,6 +617,14 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
     if (text && pending && await answerConfirmation(ctx, pending, normalize(text))) return;
 
     const askName = settings.askName && (client ? isPlaceholderName(client.name) : !profileName);
+    // Chegou pedindo o código ("me manda o código do chatgpt"): entrega direto, sem o menu.
+    const root = flowOf(ctx);
+    const actionOption = (action: FlowAction) => (settings.emailCodesEnabled ? root.options?.find((o) => o.type === 'action' && o.action === action) : undefined);
+    const direct = text && (/imagem/.test(normalize(text)) ? actionOption('trocar') : /codigo|chatgpt|\bgpt\b/.test(normalize(text)) ? actionOption('codigo') : undefined);
+    if (direct) {
+      await runNode(ctx, direct, root, { askName }, name);
+      return;
+    }
     // Já chegou dizendo o que quer ("queria agendar um corte"): boas-vindas e vai direto.
     if (text && !SMALL_TALK.test(normalize(text)) && await tryAiMenu(ctx, flowOf(ctx), { askName }, text, name, true)) return;
     await sendWelcome(ctx, name, { askName });
@@ -651,6 +674,21 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
       return;
     }
     await say(ctx, blocks('Não entendi.', menuText(ctx, menu)));
+    return;
+  }
+
+  if (step === 'ASK_ACCOUNT') {
+    await deliverCode(ctx, data);
+    return;
+  }
+
+  if (step === 'WAIT_CODE') {
+    if (/imagem|outra conta/.test(answer)) {
+      await switchAccount(ctx, data);
+      return;
+    }
+    const product = data.accountId ? await prisma.service.findUnique({ where: { id: data.accountId } }) : null;
+    await say(ctx, blocks(`Estou aguardando o código chegar no e-mail${product?.accessEmail ? ` *${product.accessEmail}*` : ''}. Assim que chegar eu te mando.`, BACK_OPTION));
     return;
   }
 
@@ -911,6 +949,186 @@ async function durationOf(ctx: BotContext, data: SessionData) {
 }
 
 const priceOf = (s: Service) => (s.priceCents ? money(s.priceCents) : 'valor sob consulta');
+
+// "Receber código": busca nas caixas de e-mail liberadas para o cliente
+// (emailCodes.service.ts) o código que acabou de chegar. Se ainda não chegou,
+// espera até ~1 min, porque o cliente costuma pedir o código e o e-mail demora.
+const CODE_POLLS = 4;
+const CODE_POLL_MS = 15_000;
+const timeBr = (date: Date) => date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+
+async function deliverCode(ctx: BotContext, data: SessionData, prefix?: string) {
+  await setSession(ctx, 'MENU', { askName: data.askName, idle: true });
+  if (!ctx.settings.emailCodesEnabled || !ctx.clientId) {
+    await say(ctx, blocks(prefix, 'Essa opção não está disponível no momento. Se precisar, fale com a equipe.'));
+    return;
+  }
+  // Contas de acesso cadastradas no catálogo: usa a conta do cliente (na
+  // agenda) ou, na primeira vez, entrega uma conta e já registra o vencimento.
+  if ((await accessProducts(ctx.companyId)).length) {
+    const access = await currentAccess(ctx.companyId, ctx.clientId);
+    if (access?.expired) {
+      await expiredAccess(ctx, access.appointment.date, prefix);
+      return;
+    }
+    if (access?.product?.accessEmail) {
+      await startCodeWait(ctx, data, access.product, blocks(prefix, `Sua conta de acesso é válida até ${fullBrDate(access.appointment.date)}.`));
+      return;
+    }
+    const product = await pickAnotherAccount(ctx.companyId, null);
+    if (!product) {
+      await handOff(ctx, blocks(prefix, 'No momento não tenho uma conta disponível. Vou te passar para a equipe.'));
+      return;
+    }
+    const expiry = await registerExpiry(ctx.companyId, ctx.clientId, product);
+    await startCodeWait(ctx, data, product, blocks(prefix, `Pronto! Separei uma conta de acesso para você, válida por ${ACCESS_DAYS} dias (até ${fullBrDate(expiry.date)}).`));
+    return;
+  }
+  if (!takeCodeRequest(ctx.companyId, ctx.waId)) {
+    await say(ctx, blocks(prefix, 'Você já pediu vários códigos na última hora. Espere alguns minutos e tente de novo, ou fale com a equipe.'));
+    return;
+  }
+
+  let results = await codesForClient(ctx.companyId, ctx.clientId);
+  if (!results.length) {
+    await say(ctx, blocks(prefix, 'Não encontrei nenhuma conta liberada para o seu número. Fale com a equipe para liberar o seu acesso.'));
+    return;
+  }
+  let intro = prefix;
+  if (!results.some((r) => r.found) && !ctx.simulated) {
+    await say(ctx, blocks(prefix, 'Estou procurando o seu código... Se ainda não pediu, peça agora no site ou no app. Eu aguardo até 1 minuto.'));
+    intro = undefined;
+    for (let i = 0; i < CODE_POLLS && !results.some((r) => r.found); i++) {
+      await sleep(CODE_POLL_MS);
+      results = await codesForClient(ctx.companyId, ctx.clientId);
+    }
+  }
+
+  const found = results.filter((r) => r.found);
+  if (!found.length) {
+    const failed = results.every((r) => r.failed);
+    await say(ctx, blocks(intro, failed
+      ? 'Não consegui acessar o e-mail agora. Tente de novo em alguns minutos ou fale com a equipe.'
+      : 'Nenhum código chegou nos últimos 15 minutos. Peça um novo código no site ou no app e me mande "código" de novo.'));
+    return;
+  }
+  const lines = found.map(({ label, found: f }) => {
+    const head = found.length > 1 ? `*${label}*\n` : '';
+    const value = f!.code ? `*${f!.code}*` : `Toque no link para continuar:\n${f!.link}`;
+    return `${head}${value}\n(recebido às ${timeBr(f!.receivedAt)})`;
+  });
+  await say(ctx, blocks(intro, found.length > 1 ? 'Seus códigos:' : 'Seu código:', ...lines, 'Ele vale por poucos minutos. Não compartilhe com ninguém.'));
+}
+
+// Espera pelo código depois que o cliente pede no site: até 5 minutos.
+const WAIT_POLLS = 20;
+const WAIT_POLL_MS = 15_000;
+const fullBrDate = (iso: string) => iso.split('-').reverse().join('/');
+
+// Manda o e-mail da conta, pede para o cliente solicitar o código no site e
+// fica esperando o código chegar nesse e-mail.
+async function startCodeWait(ctx: BotContext, data: SessionData, product: Service, intro: string) {
+  if (!takeCodeRequest(ctx.companyId, ctx.waId)) {
+    await finishConversation(ctx);
+    await say(ctx, 'Você já pediu vários códigos na última hora. Espere alguns minutos e tente de novo, ou fale com a equipe.');
+    return;
+  }
+  if (!(await hasInboxFor(ctx.companyId))) {
+    await finishConversation(ctx);
+    await say(ctx, 'Encontrei a sua conta, mas ainda não consigo ler os códigos dela. Fale com a equipe, por favor.');
+    return;
+  }
+  // Vale código pedido um pouco antes de responder aqui.
+  const since = new Date(Date.now() - 2 * 60_000);
+  const waitId = Math.random().toString(36).slice(2, 10);
+  await setSession(ctx, 'WAIT_CODE', { askName: data.askName, accountId: product.id, waitId, codeSince: since.toISOString() });
+  // Explicação primeiro e o e-mail sozinho na mensagem seguinte, sem
+  // formatação, para o cliente copiar e colar.
+  await say(ctx, blocks(
+    intro,
+    'Como entrar:\n1) Abra o ChatGPT e entre com o e-mail da próxima mensagem.\n2) Toque em Continuar para receber o código.',
+    'Assim que o código chegar eu te mando aqui. Aguardo até 5 minutos.',
+  ));
+  await say(ctx, product.accessEmail!);
+  if (ctx.simulated) {
+    // Simulador: uma consulta só, sem ficar esperando.
+    await sendAccountCode(ctx, product.id, waitId, await codeForAccount(ctx.companyId, product.accessEmail!, since), true);
+    return;
+  }
+  void watchForCode(ctx, product.id, product.accessEmail!, waitId, since);
+}
+
+// Acesso vencido: precisa de um novo pagamento, que é feito com a equipe.
+async function expiredAccess(ctx: BotContext, date: string, prefix?: string) {
+  await handOff(ctx, blocks(prefix, `Seu acesso venceu em ${fullBrDate(date)}. Para continuar usando, é preciso fazer um novo pagamento. Vou te passar para a equipe.`));
+}
+
+// "Não consigo gerar imagem": troca para outra conta (mesmo vencimento),
+// atualiza a agenda e entrega o código da conta nova.
+async function switchAccount(ctx: BotContext, data: SessionData, prefix?: string) {
+  await finishConversation(ctx);
+  if (!ctx.settings.emailCodesEnabled || !ctx.clientId) {
+    await say(ctx, blocks(prefix, 'Essa opção não está disponível no momento. Se precisar, fale com a equipe.'));
+    return;
+  }
+  const access = await currentAccess(ctx.companyId, ctx.clientId);
+  if (!access) {
+    await say(ctx, blocks(prefix, 'Você ainda não tem uma conta ativa comigo. Escolha "Receber código de acesso" primeiro.'));
+    return;
+  }
+  if (access.expired) {
+    await expiredAccess(ctx, access.appointment.date, prefix);
+    return;
+  }
+  const next = await pickAnotherAccount(ctx.companyId, access.product?.id ?? null);
+  if (!next) {
+    await handOff(ctx, blocks(prefix, 'No momento não tenho outra conta disponível. Vou te passar para a equipe.'));
+    return;
+  }
+  await switchAccess(access.appointment.id, access.product, next);
+  await startCodeWait(ctx, data, next, blocks(prefix, `Troquei a sua conta. Seu acesso continua até ${fullBrDate(access.appointment.date)}.`));
+}
+
+const waitingFor = async (ctx: BotContext, waitId: string) => {
+  const session = await prisma.whatsAppSession.findUnique({ where: { companyId_phone: { companyId: ctx.companyId, phone: ctx.waId } } });
+  return session?.step === 'WAIT_CODE' && (session.data as SessionData)?.waitId === waitId;
+};
+
+// Fica olhando o e-mail (fora do lock do contato) até o código chegar.
+async function watchForCode(ctx: BotContext, productId: string, accessEmail: string, waitId: string, since: Date) {
+  try {
+    for (let i = 0; i < WAIT_POLLS; i++) {
+      await sleep(WAIT_POLL_MS);
+      // Cliente voltou ao menu ou pediu de novo: esta espera acabou.
+      if (!(await waitingFor(ctx, waitId))) return;
+      const found = await codeForAccount(ctx.companyId, accessEmail, since);
+      if (found) return withContactLock(ctx.companyId, ctx.waId, () => sendAccountCode(ctx, productId, waitId, found, false));
+    }
+    await withContactLock(ctx.companyId, ctx.waId, () => sendAccountCode(ctx, productId, waitId, null, false));
+  } catch (err) {
+    console.error('Falha esperando o código por e-mail:', err);
+  }
+}
+
+async function sendAccountCode(ctx: BotContext, productId: string, waitId: string, found: Awaited<ReturnType<typeof codeForAccount>>, simulated: boolean) {
+  if (!(await waitingFor(ctx, waitId))) return;
+  await finishConversation(ctx);
+  if (!found) {
+    await say(ctx, simulated
+      ? '(Simulador) Nenhum código novo dessa conta agora. No WhatsApp de verdade, o bot espera até 5 minutos pelo e-mail.'
+      : 'O código não chegou em 5 minutos. Peça um novo código no ChatGPT e me mande "código" de novo.');
+    return;
+  }
+  const product = await prisma.service.findUnique({ where: { id: productId } });
+  const expiry = product && ctx.clientId ? await registerExpiry(ctx.companyId, ctx.clientId, product) : null;
+  await say(ctx, blocks(
+    found.code ? `Seu código:\n*${found.code}*` : `Toque no link para continuar:\n${found.link}`,
+    'Ele vale por poucos minutos. Não compartilhe com ninguém.',
+    expiry && (expiry.created
+      ? `Seu acesso de ${ACCESS_DAYS} dias vai até ${fullBrDate(expiry.date)}.`
+      : `Seu acesso vai até ${fullBrDate(expiry.date)}.`),
+  ));
+}
 
 async function showCatalog(ctx: BotContext, data: SessionData, prefix?: string) {
   const [services, products] = await Promise.all([activeServices(ctx.companyId), activeProducts(ctx.companyId)]);

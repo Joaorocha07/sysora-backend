@@ -87,7 +87,7 @@ export async function listCompanies() {
     orderBy: { createdAt: 'desc' },
     include: {
       account: true,
-      settings: { select: { whatsappConnected: true, whatsappPhone: true } },
+      settings: { select: { whatsappConnected: true, whatsappPhone: true, emailCodesEnabled: true } },
       memberships: { where: { status: MembershipStatus.ACTIVE, user: { isSuperAdmin: false } }, include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } } },
       _count: { select: { clients: true, appointments: true, services: true } },
     },
@@ -105,6 +105,7 @@ export async function listCompanies() {
     createdAt: c.createdAt,
     subscription: subscriptionSummary(c.account),
     whatsappConnected: c.settings?.whatsappConnected ?? false,
+    emailCodesEnabled: c.settings?.emailCodesEnabled ?? false,
     whatsappPhone: c.settings?.whatsappPhone ?? null,
     users: c.memberships.length,
     admins: c.memberships.filter((m) => m.role === Role.ADMIN).map((m) => m.user),
@@ -149,11 +150,14 @@ export async function createCompany(input: CompanyInput & { plan: Plan; trial: b
   return { company, adminAlreadyExisted: Boolean(existing) };
 }
 
-export async function updateCompany(companyId: string, input: Partial<CompanyInput> & { active?: boolean }) {
+export async function updateCompany(companyId: string, { emailCodesEnabled, ...input }: Partial<CompanyInput> & { active?: boolean; emailCodesEnabled?: boolean }) {
   const company = await prisma.company.findUnique({ where: { id: companyId } });
   if (!company) throw HttpError.notFound('Empresa não encontrada.');
 
   const updated = await prisma.company.update({ where: { id: companyId }, data: { ...input, email: input.email === '' ? null : input.email } });
+  if (emailCodesEnabled !== undefined) {
+    await prisma.companySettings.upsert({ where: { companyId }, update: { emailCodesEnabled }, create: { companyId, emailCodesEnabled } });
+  }
   if (input.active === false) {
     // Empresa desativada: encerra as sessões e desliga o WhatsApp dela.
     await prisma.refreshToken.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: new Date() } });

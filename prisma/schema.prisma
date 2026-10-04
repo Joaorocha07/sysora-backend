@@ -288,6 +288,9 @@ model Service {
   active          Boolean  @default(true)
   // Ordem na lista oferecida pelo bot.
   position        Int      @default(0)
+  // Produto que é uma conta de acesso (códigos por e-mail): o bot pergunta o
+  // e-mail ao cliente, acha a conta mais parecida e entrega o código dela.
+  accessEmail     String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -388,6 +391,8 @@ model CompanySettings {
 
   // Chatbot. As mensagens aceitam {nome}, {empresa}, {servico}, {data} e {hora}.
   botEnabled          Boolean @default(true)
+  // Opção "Receber código" do bot (códigos que chegam por e-mail). Só o admin master liga.
+  emailCodesEnabled   Boolean @default(false)
   autoCreateClient    Boolean @default(true)
   askName             Boolean @default(true)
   greetingMessage     String  @default("Olá, {nome}! Bem-vindo(a) à {empresa}.")

@@ -72,6 +72,20 @@ export function takeTestSend(companyId: string, now = Date.now()): boolean {
   return true;
 }
 
+// Pedidos de código por e-mail ("Receber código"): poucos por cliente.
+const CODE_LIMIT = 6;
+const CODE_WINDOW_MS = 60 * 60_000;
+const codeRequests = new Map<string, number[]>();
+
+export function takeCodeRequest(companyId: string, contactId: string, now = Date.now()): boolean {
+  const key = `${companyId}:${contactId}`;
+  const recent = (codeRequests.get(key) ?? []).filter((t) => now - t < CODE_WINDOW_MS);
+  if (recent.length >= CODE_LIMIT) return false;
+  recent.push(now);
+  codeRequests.set(key, recent);
+  return true;
+}
+
 // Cache de "esse número tem WhatsApp?", para não consultar a cada minuto.
 const NUMBER_CACHE_MS = 24 * 60 * 60_000;
 const numberCache = new Map<string, { jid: string | null; at: number }>();

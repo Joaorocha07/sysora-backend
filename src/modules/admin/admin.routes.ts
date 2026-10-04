@@ -38,6 +38,8 @@ const updateCompanySchema = z.object({
   ...companyFields,
   name: companyFields.name.optional(),
   active: z.boolean().optional(),
+  // Recurso "Receber código" (códigos por e-mail no bot), liberado por empresa.
+  emailCodesEnabled: z.boolean().optional(),
 });
 
 const isoDateTime = z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).nullish();
