@@ -6,6 +6,8 @@ import { appointmentInclude, AppointmentWithRelations } from '../appointments/ap
 import { ACTIVE_STATUSES } from '../appointments/availability';
 import { endIdleHumanSession, humanSessionEndsAt, SendText, sendDayBeforeReminder, sendHourReminder, withContactLock } from './whatsapp.bot';
 import { customerWindowOpen, getCloudAccount, sendReminderTemplate, templateApproved } from './whatsapp.cloud';
+import { findWhatsAppJid } from './whatsapp.connection';
+import { sleep, takeFirstContact } from './whatsapp.safety';
 import { isReady, sendText } from './whatsapp.transport';
 
 // Tarefas periódicas do bot:
@@ -16,14 +18,13 @@ import { isReady, sendText } from './whatsapp.transport';
 // - Atendimento pela equipe parado: encerra e devolve o cliente ao bot.
 
 const CHECK_INTERVAL_MS = 60 * 1000;
-// Espaço entre um envio e outro, para não disparar tudo de uma vez.
-const DELAY_BETWEEN_MS = 2000;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// Espaço entre um lembrete e outro (sorteado), para não disparar tudo de uma vez.
+const betweenReminders = () => 4_000 + Math.random() * 6_000;
 
 type ReminderKind = 'day' | 'hour';
 
 export function dueReminder(a: AppointmentWithRelations, settings: CompanySettings, now = new Date()): ReminderKind | null {
-  if (!ACTIVE_STATUSES.includes(a.status) || !a.client.whatsappId) return null;
+  if (!ACTIVE_STATUSES.includes(a.status) || !a.client.whatsappId || a.client.whatsappOptOutAt) return null;
   const at = dateTime(a.date, a.startTime);
   if (Number.isNaN(at.getTime()) || at <= now) return null;
 
@@ -61,7 +62,7 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
           companyId: settings.companyId,
           status: { in: ACTIVE_STATUSES },
           date: { in: [toIsoDate(now), toIsoDate(addDays(now, 1))] },
-          client: { whatsappId: { not: null } },
+          client: { whatsappId: { not: null }, whatsappOptOutAt: null },
           OR: [{ reminderSentAt: null }, { hourReminderSentAt: null }],
         },
         include: appointmentInclude,
@@ -76,6 +77,17 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
             const kind = appointment && dueReminder(appointment, settings, new Date());
             if (!appointment || !kind) return;
             let send: SendText = (text) => sendText(settings.companyId, appointment.client.whatsappId!, text);
+            if (!cloudAccount) {
+              // QR Code: cliente que nunca escreveu para a empresa (cadastrado pela
+              // equipe) é o envio de maior risco de bloqueio. Confere se o número
+              // tem WhatsApp e respeita o limite diário de primeiros contatos.
+              const wrote = await prisma.message.findFirst({ where: { clientId: appointment.clientId, sender: 'CLIENT' }, select: { id: true } });
+              if (!wrote) {
+                const jid = await findWhatsAppJid(settings.companyId, appointment.client.whatsappId!.replace(/\D/g, ''));
+                if (!jid || !takeFirstContact(settings.companyId)) return;
+                send = (text) => sendText(settings.companyId, jid, text);
+              }
+            }
             // API oficial: sem conversa nas últimas 24 h, o lembrete só sai como
             // template aprovado. Ainda em análise na Meta: tenta de novo no próximo ciclo.
             // Cliente da conexão antiga sem número visível (@lid): a API oficial não alcança.
@@ -91,7 +103,7 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
         } catch (err) {
           console.error('Falha ao enviar lembrete do WhatsApp:', err);
         }
-        await sleep(DELAY_BETWEEN_MS);
+        await sleep(betweenReminders());
       }
     }
   } finally {

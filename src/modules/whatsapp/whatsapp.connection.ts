@@ -26,6 +26,7 @@ import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { clearStoredSession, listCompaniesWithSession, useDatabaseAuthState } from '../../lib/whatsappAuthState';
 import { handleIncomingMessage, handleMessageFromPhone } from './whatsapp.bot';
+import { cachedLookup, sleep, typingDelay, waitSendSlot } from './whatsapp.safety';
 
 // Conexão de cada empresa com o WhatsApp Web (Baileys). O administrador lê o
 // QR Code na tela da Sysora e o servidor passa a funcionar como um "aparelho
@@ -149,9 +150,17 @@ function requireSocket(companyId: string): WASocket {
 }
 
 // `contact` é o whatsappId salvo no cliente (só dígitos) ou um JID completo.
+// Antes de enviar mostra "digitando..." por alguns segundos e respeita um
+// intervalo entre envios do número (whatsapp.safety.ts): resposta instantânea
+// e rajada de mensagens são os sinais de robô que levam a bloqueio.
 export async function sendText(companyId: string, contact: string, text: string): Promise<void> {
-  const sock = requireSocket(companyId);
-  rememberSent(await sock.sendMessage(toJid(contact), { text }));
+  const jid = toJid(contact);
+  const presence = (state: 'composing' | 'paused') => requireSocket(companyId).sendPresenceUpdate(state, jid).catch(() => {});
+  await presence('composing');
+  await sleep(typingDelay(text));
+  await waitSendSlot(companyId);
+  await presence('paused');
+  rememberSent(await requireSocket(companyId).sendMessage(jid, { text }));
 }
 
 // Salva (ou atualiza) o cliente nos contatos do WhatsApp da empresa, que
@@ -172,8 +181,10 @@ export async function saveContact(companyId: string, contactId: string, chatJid:
 // exemplo, números brasileiros com ou sem o nono dígito).
 export async function findWhatsAppJid(companyId: string, phoneDigits: string): Promise<string | null> {
   const sock = requireSocket(companyId);
-  const [result] = (await sock.onWhatsApp(phoneDigits)) ?? [];
-  return result?.exists ? result.jid : null;
+  return cachedLookup(phoneDigits, async () => {
+    const [result] = (await sock.onWhatsApp(phoneDigits)) ?? [];
+    return result?.exists ? result.jid : null;
+  });
 }
 
 async function openSocket(companyId: string, conn: Connection): Promise<void> {
@@ -336,6 +347,8 @@ async function handleUpsert(companyId: string, sock: WASocket, message: WAMessag
     } : undefined,
     profileName: message.pushName ?? undefined,
     send: (reply) => sendText(companyId, jid, reply),
+    // Marca como lida só quando o bot vai responder (com a equipe atendendo, fica não lida no celular).
+    typing: () => sock.readMessages([message.key]),
     saveContact: (name) => saveContact(companyId, contactId, jid, name),
   });
 }

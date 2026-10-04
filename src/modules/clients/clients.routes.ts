@@ -15,6 +15,8 @@ const clientSchema = z.object({
   email: z.string().trim().email('E-mail inválido.').nullish().or(z.literal('')),
   birthday: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida.').nullish().or(z.literal('')),
   notes: z.string().trim().max(2000).nullish(),
+  // false = não enviar lembretes automáticos pelo WhatsApp (o cliente pediu PARAR).
+  reminders: z.boolean().optional(),
 });
 
 const listQuerySchema = z.object({
@@ -32,11 +34,12 @@ function whatsappIdFromPhone(phone: string): string | null {
   return null;
 }
 
-function clean<T extends Partial<z.infer<typeof clientSchema>>>(body: T) {
+function clean<T extends Partial<z.infer<typeof clientSchema>>>({ reminders, ...body }: T) {
   return {
     ...body,
     email: body.email || null,
     birthday: body.birthday || null,
+    ...(reminders === undefined ? {} : { whatsappOptOutAt: reminders ? null : new Date() }),
   };
 }
 

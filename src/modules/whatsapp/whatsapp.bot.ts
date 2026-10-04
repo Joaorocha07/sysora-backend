@@ -9,6 +9,7 @@ import * as appointmentsService from '../appointments/appointments.service';
 import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availability';
 import { Understanding, understand } from './whatsapp.ai';
 import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
+import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent } from './whatsapp.safety';
 
 // Chatbot do WhatsApp. Toda mensagem recebida: encontra (ou cria) o cliente
 // pelo número, salva a mensagem na conversa dele e, se o bot estiver ligado,
@@ -525,7 +526,7 @@ function reminderNote(settings: CompanySettings, date: string, time: string): st
 // Lembretes (chamados por whatsapp.jobs.ts, dentro do lock do contato).
 export async function sendDayBeforeReminder(settings: CompanySettings, companyName: string, appointment: FullAppointment, send: SendText) {
   const ctx: BotContext = { companyId: appointment.companyId, companyName, waId: appointment.client.whatsappId!, send, settings, clientId: appointment.clientId };
-  await say(ctx, blocks(fillTemplate(settings.reminderMessage, appointmentVars(appointment, companyName)), CONFIRM_OPTIONS));
+  await say(ctx, blocks(fillTemplate(settings.reminderMessage, appointmentVars(appointment, companyName)), CONFIRM_OPTIONS, OPT_OUT_HINT));
   await prisma.appointment.update({ where: { id: appointment.id }, data: { reminderSentAt: new Date() } });
   await setSession(ctx, 'CONFIRM', { appointmentId: appointment.id });
 }
@@ -573,6 +574,8 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
   ctx.clientId = client?.id ?? null;
   const logged = transcript ? `🎤 Áudio: "${transcript}"` : text ?? `[${MEDIA_LABELS[message.mediaType ?? ''] ?? 'mensagem'}]`;
   await logMessage(ctx.companyId, ctx.clientId, logged, MessageSender.CLIENT);
+  // Rajada de mensagens (geralmente outro robô): não entra numa conversa sem fim.
+  if (!message.settingsOverride && shouldStaySilent(ctx.companyId, ctx.waId)) return;
 
   let session = await prisma.whatsAppSession.findUnique({ where: { companyId_phone: { companyId: ctx.companyId, phone: ctx.waId } } });
   if (session && (sessionExpired(session, settings) || (text && RESET_WORDS.has(normalize(text))))) {
@@ -581,6 +584,14 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
   }
 
   if (!settings.botEnabled) return;
+
+  // "PARAR": sem lembretes automáticos para esse cliente (evita denúncia do número).
+  if (text && session?.step !== 'HUMAN' && OPT_OUT.test(normalize(text))) {
+    if (ctx.clientId) await prisma.client.update({ where: { id: ctx.clientId }, data: { whatsappOptOutAt: new Date() } });
+    await clearSession(ctx);
+    await say(ctx, 'Pronto, você não vai mais receber lembretes automáticos. Se precisar de algo, é só mandar uma mensagem por aqui.');
+    return;
+  }
   // Com a equipe atendendo, a mensagem fica como não lida para ela ver.
   if (session?.step !== 'HUMAN') message.typing?.().catch(() => {});
 

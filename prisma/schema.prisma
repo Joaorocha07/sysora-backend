@@ -253,6 +253,8 @@ model Client {
   notes         String?
   // wa_id do WhatsApp (ex.: 5531999999999), destino das mensagens do sistema.
   whatsappId    String?
+  // Respondeu "PARAR": não recebe lembretes automáticos pelo WhatsApp.
+  whatsappOptOutAt DateTime?
   source        Source    @default(STAFF)
   lastMessageAt DateTime?
   // Mensagens do cliente ainda não vistas pela equipe (caixa de conversas).

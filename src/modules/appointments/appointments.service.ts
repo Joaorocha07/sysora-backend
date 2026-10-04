@@ -7,7 +7,7 @@ import { ACTIVE_STATUSES, hasCapacity } from './availability';
 
 export const appointmentInclude = {
   items: true,
-  client: { select: { id: true, name: true, phone: true, whatsappId: true } },
+  client: { select: { id: true, name: true, phone: true, whatsappId: true, whatsappOptOutAt: true } },
   staff: { select: { id: true, name: true } },
 } satisfies Prisma.AppointmentInclude;
 

@@ -15,6 +15,7 @@ import * as cloud from './whatsapp.cloud';
 import * as connection from './whatsapp.connection';
 import { defaultFlow, findNode, flowSchema, getFlow } from './whatsapp.flow';
 import * as simulator from './whatsapp.simulator';
+import { takeTestSend } from './whatsapp.safety';
 import * as sora from './whatsapp.sora';
 
 const saveFlowSchema = z.object({ flow: flowSchema });
@@ -146,6 +147,7 @@ whatsappRouter.post('/test', requireRole(Role.ADMIN), validate(sendTestSchema), 
     // Fora da janela de 24 h a Meta descarta texto livre, então o teste é pelo lado do cliente.
     throw HttpError.badRequest('No WhatsApp oficial a empresa não pode puxar conversa com texto livre. Para testar, mande um "oi" do seu celular para o número da empresa: o bot responde na hora.');
   }
+  if (!takeTestSend(companyId)) throw HttpError.badRequest('Muitos testes seguidos. Para proteger o número, espere alguns minutos antes de enviar outro.');
   const jid = await connection.findWhatsAppJid(companyId, req.body.to.replace(/\D/g, ''));
   if (!jid) throw HttpError.badRequest('Esse número não tem WhatsApp. Confira o DDI e o DDD (ex.: 5531999999999).');
   await connection.sendText(companyId, jid, 'Mensagem de teste da Sysora. Sua conexão com o WhatsApp está funcionando!');
