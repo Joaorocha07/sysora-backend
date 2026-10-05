@@ -7,9 +7,10 @@ import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
 import { transcribeAudio, transcriptionEnabled } from '../../lib/transcription';
 import * as appointmentsService from '../appointments/appointments.service';
+import { bookingLinkFor } from '../booking/booking.service';
 import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availability';
 import { Understanding, understand } from './whatsapp.ai';
-import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
+import { FlowAction, FlowNode, findNode, getFlow, isBookingAction } from './whatsapp.flow';
 import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent, sleep, takeCodeRequest } from './whatsapp.safety';
 import { accessProducts, codeForAccount, codesForClient, currentAccess, hasInboxFor, pickAnotherAccount, registerExpiry, switchAccess } from '../emailCodes/emailCodes.service';
 
@@ -30,6 +31,8 @@ import { accessProducts, codeForAccount, codesForClient, currentAccess, hasInbox
 // serviços, o dia e o horário ("quero cortar o cabelo sexta às 15h" agenda
 // direto se o horário estiver livre) ou responde uma pergunta com os dados da
 // empresa. Áudios são transcritos (lib/transcription.ts) e seguem igual.
+// A função "Agendar pelo link" (ação 'link' do fluxo) manda um link pessoal
+// da agenda (booking.service.ts) em vez de perguntar serviço, dia e horário.
 
 type BotStep = 'MENU' | 'ASK_NAME' | 'ASK_SERVICE' | 'ASK_DATE' | 'ASK_TIME' | 'CONFIRM' | 'MANAGE' | 'ASK_PRODUCT' | 'HUMAN' | 'ASK_ACCOUNT' | 'WAIT_CODE';
 type SessionData = {
@@ -117,6 +120,7 @@ const MENU_KEYWORDS: [FlowAction, RegExp][] = [
   ['codigo', /codigo|code|chatgpt|\bgpt\b|token|verificacao/],
   ['meus', /remarc|cancel|desmarc|meu horario|meus horarios|meu agendamento|meus agendamentos|confirm/],
   ['agendar', /agend|marcar|horario/],
+  ['link', /agend|marcar|horario/],
   ['servicos', /servico|produto|preco|valor|quanto|tabela/],
   ['equipe', /atend|equipe|falar|pessoa|humano/],
 ];
@@ -251,7 +255,9 @@ async function runNode(ctx: BotContext, node: FlowNode, parent: FlowNode | null,
   if (!node.together) await sayParts(ctx, messages, false);
   const prefix = node.together ? blocks(...messages) : '';
   const intro = prefix || (messages.length ? '' : 'Ótimo!');
-  if (node.action === 'agendar') {
+  if (node.action === 'link') {
+    await sendBookingLink(ctx, intro);
+  } else if (node.action === 'agendar') {
     // Serviço, dia e horário que o cliente já disse (IA) seguem para o agendamento.
     const booking: SessionData = { ...base, serviceIds: data.serviceIds, wish: data.wish };
     if (data.askName) {
@@ -873,7 +879,9 @@ function optionFromAi(u: Understanding, menu: FlowNode): FlowNode | undefined {
   if (u.option) return options[u.option - 1];
   const manage = CONFIRM_ACTIONS.includes(u.intent as ManageAction);
   const action = manage ? 'meus' : (['agendar', 'meus', 'servicos', 'equipe'] as const).find((a) => a === u.intent);
-  return action ? options.find((o) => o.type === 'action' && o.action === action) : undefined;
+  // "Quero agendar" vale tanto para agendar pela conversa quanto pelo link.
+  const matches = (o: FlowNode) => o.type === 'action' && (action === 'agendar' ? isBookingAction(o.action) : o.action === action);
+  return action ? options.find(matches) : undefined;
 }
 
 // Texto livre no menu (ou na primeira mensagem): segue para a opção certa,
@@ -1159,7 +1167,7 @@ async function showCatalog(ctx: BotContext, data: SessionData, prefix?: string) 
     return;
   }
   const describe = (s: Service, extra = '') => `• ${s.name}: ${priceOf(s)}${extra}${s.description ? `\n   ${s.description}` : ''}`;
-  const bookOption = (flowOf(ctx).options ?? []).findIndex((o) => o.action === 'agendar');
+  const bookOption = (flowOf(ctx).options ?? []).findIndex((o) => isBookingAction(o.action));
   await say(ctx, blocks(
     prefix,
     services.length > 0 && `Nossos serviços:\n${services.map((s) => describe(s, ` (${durationLabel(s.durationMinutes)})`)).join('\n')}`,
@@ -1210,6 +1218,57 @@ async function offerProducts(ctx: BotContext, data: SessionData, text: string) {
   }
   await setSession(ctx, 'ASK_PRODUCT', { askName: data.askName });
   await say(ctx, productQuestion(products));
+}
+
+// ---------- Agendamento pelo link ----------
+
+// Link pessoal da agenda: o cliente escolhe serviço, dia e horário na página,
+// já identificado (nome e telefone). A confirmação volta por aqui (confirmLinkBooking).
+async function sendBookingLink(ctx: BotContext, prefix?: string) {
+  if (!ctx.clientId) {
+    // "Cadastrar clientes automaticamente" desligado: entra agora, para o link saber quem é.
+    const client = await prisma.client.create({
+      data: { companyId: ctx.companyId, name: placeholderName(ctx.waId), phone: formatPhone(ctx.waId), whatsappId: ctx.waId, source: Source.BOT },
+    });
+    ctx.clientId = client.id;
+  }
+  const { url } = await bookingLinkFor(ctx.companyId, ctx.clientId);
+  await finishConversation(ctx);
+  await say(ctx, blocks(
+    prefix,
+    'Para agendar, toque no link abaixo e escolha o serviço, o dia e o horário que ficam melhor para você:',
+    url,
+    'O link é só seu e vale por 7 dias. Assim que você marcar, eu te confirmo por aqui.',
+    ctx.simulated && '(Simulador) No WhatsApp de verdade o cliente recebe um link que funciona. Este é só um exemplo.',
+  ));
+}
+
+// Agendamento feito na página do link (chamado por booking.routes.ts, dentro do
+// lock do contato): confirmação com o resumo (serviço, data, valor e local) e o
+// link do comprovante.
+export async function confirmLinkBooking(
+  settings: CompanySettings,
+  company: { name: string; address: string | null },
+  appointment: FullAppointment,
+  receiptUrl: string,
+  send: SendText,
+) {
+  const ctx: BotContext = { companyId: appointment.companyId, companyName: company.name, waId: appointment.client.whatsappId!, send, settings, clientId: appointment.clientId };
+  const weekday = WEEKDAYS[weekdayOf(appointment.date)];
+  const summary = [
+    '*Resumo do agendamento*',
+    `Serviço: ${servicesOf(appointment)}`,
+    `Data: ${weekday}, ${fullBrDate(appointment.date)} às ${appointment.startTime} (até ${appointment.endTime})`,
+    appointment.totalCents > 0 && `Valor: ${money(appointment.totalCents)}`,
+    company.address && `Local: ${company.address}`,
+  ].filter(Boolean).join('\n');
+  await finishConversation(ctx);
+  await say(ctx, blocks(
+    fillTemplate(settings.confirmationMessage, appointmentVars(appointment, company.name)),
+    summary,
+    `Seu comprovante: ${receiptUrl}`,
+    reminderNote(settings, appointment.date, appointment.startTime),
+  ));
 }
 
 async function offerServices(ctx: BotContext, data: SessionData, prefix: string) {

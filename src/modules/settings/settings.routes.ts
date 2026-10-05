@@ -47,9 +47,10 @@ const companyProfileSchema = z.object({
   document: documentField,
   phone: z.string().trim().max(30).nullish(),
   email: z.string().trim().email('E-mail inválido.').nullish().or(z.literal('')),
+  address: z.string().trim().max(200).nullish(),
 });
 
-const companyProfileSelect = { id: true, name: true, slug: true, document: true, phone: true, email: true, inviteCode: true } as const;
+const companyProfileSelect = { id: true, name: true, slug: true, document: true, phone: true, email: true, address: true, inviteCode: true } as const;
 
 export const settingsRouter = Router();
 
@@ -74,7 +75,7 @@ settingsRouter.put('/', requireRole(Role.ADMIN), validate(updateSettingsSchema),
 settingsRouter.patch('/company', requireRole(Role.ADMIN), validate(companyProfileSchema), asyncHandler(async (req: Request, res: Response) => {
   const company = await prisma.company.update({
     where: { id: companyOf(req) },
-    data: { ...req.body, email: req.body.email || null },
+    data: { ...req.body, email: req.body.email || null, ...(req.body.address !== undefined ? { address: req.body.address || null } : {}) },
     select: companyProfileSelect,
   });
   return res.json({ company });

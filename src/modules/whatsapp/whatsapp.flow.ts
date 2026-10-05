@@ -5,14 +5,16 @@ import { z } from 'zod';
 // a raiz é o menu de boas-vindas e cada opção leva a um nó:
 //   menu     -> envia as mensagens e um submenu com novas opções
 //   message  -> envia as mensagens e volta ao menu principal ou ao anterior
-//   action   -> função pronta do sistema (agendar, meus agendamentos...)
+//   action   -> função pronta do sistema (agendar, agendar pelo link, meus agendamentos...)
 //   end      -> envia as mensagens e encerra o atendimento
 // "together" junta as mensagens do nó (e o menu) num único balão; desligado,
 // cada uma vai separada. Sem fluxo salvo, vale o padrão (o menu clássico).
+// A empresa guarda até 5 fluxos (whatsapp.flows.ts); o bot usa o que está em uso.
 
 // 'codigo' e 'trocar' (códigos por e-mail) só funciona nas empresas liberadas pelo admin master
 // e fica fora do menu padrão.
-export const FLOW_ACTIONS = ['agendar', 'meus', 'servicos', 'equipe', 'codigo', 'trocar'] as const;
+// 'link' agenda pela página do link pessoal (booking.service.ts) em vez da conversa.
+export const FLOW_ACTIONS = ['agendar', 'link', 'meus', 'servicos', 'equipe', 'codigo', 'trocar'] as const;
 const DEFAULT_ACTIONS: FlowAction[] = ['agendar', 'meus', 'servicos', 'equipe'];
 export type FlowAction = (typeof FLOW_ACTIONS)[number];
 export type FlowNodeType = 'menu' | 'message' | 'action' | 'end';
@@ -31,6 +33,7 @@ export type FlowNode = {
 
 export const ACTION_LABELS: Record<FlowAction, string> = {
   agendar: 'Agendar um horário',
+  link: 'Agendar pelo link',
   meus: 'Meus agendamentos',
   servicos: 'Serviços e valores',
   equipe: 'Falar com a equipe',
@@ -87,6 +90,26 @@ export function defaultFlow(settings: Pick<CompanySettings, 'greetingMessage'>):
     options: DEFAULT_ACTIONS.map((action) => ({ id: action, label: ACTION_LABELS[action], type: 'action', action, messages: [], together: true })),
   };
 }
+
+// Modelos para um fluxo novo (botão "+" e os dois que toda empresa já recebe).
+export const FLOW_TEMPLATES = ['padrao', 'link', 'vazio'] as const;
+export type FlowTemplate = (typeof FLOW_TEMPLATES)[number];
+export const TEMPLATE_NAMES: Record<FlowTemplate, string> = { padrao: 'Padrão', link: 'Agendamento pelo link', vazio: 'Novo fluxo' };
+
+export function templateFlow(template: FlowTemplate, settings: Pick<CompanySettings, 'greetingMessage'>): FlowNode {
+  const base = defaultFlow(settings);
+  if (template === 'link') {
+    // Igual ao padrão, mas "Agendar um horário" manda o link da agenda.
+    return { ...base, options: base.options?.map((o) => (o.action === 'agendar' ? { ...o, action: 'link' as const } : o)) };
+  }
+  if (template === 'vazio') {
+    // Do zero: só as boas-vindas e uma opção (todo menu precisa de ao menos uma).
+    return { ...base, messages: ['Olá, {nome}! Bem-vindo(a) à {empresa}.'], options: [{ id: 'equipe', label: ACTION_LABELS.equipe, type: 'action', action: 'equipe', messages: [], together: true }] };
+  }
+  return base;
+}
+
+export const isBookingAction = (action: FlowAction | undefined) => action === 'agendar' || action === 'link';
 
 export function getFlow(settings: Pick<CompanySettings, 'greetingMessage' | 'botFlow'>): FlowNode {
   if (!settings.botFlow) return defaultFlow(settings);

@@ -137,6 +137,8 @@ model Company {
   document   String?
   phone      String?
   email      String?
+  // Endereço de atendimento: vai na confirmação e no comprovante do agendamento pelo link.
+  address    String?
   // Código que o funcionário informa no cadastro para pedir acesso à empresa.
   inviteCode String   @unique
   // Empresa criada pelo cadastro público do site (e não pelo admin master).
@@ -159,6 +161,8 @@ model Company {
   emailInboxes     EmailInbox[]
   soraConversations SoraConversation[]
   clientSubscriptions ClientSubscription[]
+  bookingLinks     BookingLink[]
+  botFlows         BotFlow[]
   account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
   surveys          OnboardingSurvey[]
@@ -280,6 +284,7 @@ model Client {
   messages     Message[]
   emailAccess  ClientEmailAccess[]
   subscriptions ClientSubscription[]
+  bookingLinks  BookingLink[]
 
   @@index([companyId])
   @@index([companyId, whatsappId])
@@ -334,6 +339,8 @@ model Appointment {
   hourReminderSentAt DateTime?
   confirmedAt        DateTime?
   canceledAt         DateTime?
+  // Comprovante público (página /comprovante/[token]); gerado no agendamento pelo link.
+  receiptToken       String?           @unique
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -407,6 +414,9 @@ model CompanySettings {
 
   // Chatbot. As mensagens aceitam {nome}, {empresa}, {servico}, {data} e {hora}.
   botEnabled          Boolean @default(true)
+  // Obsoleto: o agendamento pelo link virou a função 'link' do fluxo. Não é
+  // mais lido; a coluna fica até alguém removê-la com uma migration revisada.
+  bookingLinkEnabled  Boolean @default(false)
   // Opção "Receber código" do bot (códigos que chegam por e-mail). Só o admin master liga.
   emailCodesEnabled   Boolean @default(false)
   // Assinaturas dos clientes (venda mensal com vencimento). Só o admin master liga.
@@ -427,8 +437,10 @@ model CompanySettings {
   pauseOnStaffReply   Boolean @default(true)
   humanTimeoutMinutes Int     @default(30)
   humanEndMessage     String  @default("Seu atendimento com a nossa equipe foi encerrado. Obrigado pelo contato!")
-  // Fluxo do bot montado na aba "Fluxo do bot" (whatsapp.flow.ts). Nulo = menu padrão.
+  // Fluxo do bot em uso: cópia do BotFlow activeFlowId, que é o que o bot lê
+  // (whatsapp.flow.ts). Nulo = menu padrão.
   botFlow             Json?
+  activeFlowId        String?
   // Uso da Sora (IA que monta o fluxo) no mês corrente, para o limite mensal.
   soraMonth           String?
   soraCount           Int     @default(0)
@@ -716,4 +728,36 @@ model ClientSubscription {
   @@index([companyId, dueDate])
   @@index([clientId])
   @@map("client_subscriptions")
+}
+
+// Link pessoal de agendamento mandado pelo bot: abre a página pública
+// /agendar/[token] já com o nome e o telefone do cliente. Vale até expiresAt.
+model BookingLink {
+  token     String   @id
+  companyId String
+  clientId  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@map("booking_links")
+}
+
+// Fluxos do bot da empresa (até 5, aba "Fluxo do bot"): um fica em uso
+// (CompanySettings.activeFlowId) e os outros são modelos/rascunhos guardados.
+model BotFlow {
+  id        String   @id @default(uuid())
+  companyId String
+  name      String
+  flow      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("bot_flows")
 }

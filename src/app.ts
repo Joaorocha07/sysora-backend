@@ -10,6 +10,7 @@ import { requireSchema, schemaState } from './lib/schemaGuard';
 import { accountRouter } from './modules/account/account.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { appointmentsRouter } from './modules/appointments/appointments.routes';
+import { bookingRouter } from './modules/booking/booking.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { clientsRouter } from './modules/clients/clients.routes';
 import { clientSubscriptionsRouter } from './modules/clientSubscriptions/clientSubscriptions.routes';
@@ -63,6 +64,8 @@ app.use('/api/clients', clientsRouter);
 app.use('/api/client-subscriptions', clientSubscriptionsRouter);
 app.use('/api/services', servicesRouter);
 app.use('/api/appointments', appointmentsRouter);
+// Página pública do link de agendamento (sem login).
+app.use('/api/booking', bookingRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/settings', settingsRouter);

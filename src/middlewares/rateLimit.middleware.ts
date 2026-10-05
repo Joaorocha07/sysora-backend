@@ -33,6 +33,15 @@ export const signupRateLimiter = rateLimit({
   message: tooMany('Muitos cadastros a partir desta rede. Tente novamente mais tarde.'),
 });
 
+// Agendamento pela página pública do link do bot: poucas marcações por IP.
+export const bookingRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: tooMany('Muitas tentativas de agendamento. Tente novamente em alguns minutos.'),
+});
+
 export const apiRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 300,

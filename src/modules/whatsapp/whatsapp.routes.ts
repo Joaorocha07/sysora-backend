@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { Prisma, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { z } from 'zod';
 import { asyncHandler } from '../../lib/asyncHandler';
 import { HttpError } from '../../lib/httpError';
@@ -13,11 +13,13 @@ import * as settingsService from '../settings/settings.service';
 import * as ai from './whatsapp.ai';
 import * as cloud from './whatsapp.cloud';
 import * as connection from './whatsapp.connection';
-import { defaultFlow, findNode, flowSchema, getFlow } from './whatsapp.flow';
+import { FLOW_TEMPLATES, findNode, flowSchema } from './whatsapp.flow';
+import * as flows from './whatsapp.flows';
 import * as simulator from './whatsapp.simulator';
 import { takeTestSend } from './whatsapp.safety';
 
-const saveFlowSchema = z.object({ flow: flowSchema });
+const saveFlowSchema = z.object({ flow: flowSchema.optional(), name: z.string().trim().min(1, 'Dê um nome ao fluxo.').max(40).optional() });
+const createFlowSchema = z.object({ template: z.enum(FLOW_TEMPLATES), name: z.string().trim().max(40).optional() });
 
 const understandSchema = z.object({
   flow: flowSchema,
@@ -147,31 +149,37 @@ whatsappRouter.post('/test', requireRole(Role.ADMIN), validate(sendTestSchema), 
   return res.json({ message: 'Mensagem de teste enviada.' });
 }));
 
-// Fluxo do bot (aba "Fluxo do bot"). Sem fluxo salvo, devolve o padrão.
+// Fluxos do bot (aba "Fluxo do bot"): até 5, um em uso no WhatsApp (whatsapp.flows.ts).
 whatsappRouter.get('/flow', asyncHandler(async (req: Request, res: Response) => {
-  const settings = await settingsService.getSettings(companyOf(req));
-  return res.json({ flow: getFlow(settings), custom: Boolean(settings.botFlow) });
+  return res.json(await flows.getActiveFlow(companyOf(req)));
 }));
 
-whatsappRouter.put('/flow', requireRole(Role.ADMIN), validate(saveFlowSchema), asyncHandler(async (req: Request, res: Response) => {
-  const companyId = companyOf(req);
-  await settingsService.getSettings(companyId);
-  await prisma.companySettings.update({ where: { companyId }, data: { botFlow: req.body.flow } });
-  // Conversas no meio do fluxo antigo podem apontar para etapas que não existem mais.
-  await prisma.whatsAppSession.deleteMany({ where: { companyId, step: 'MENU' } });
-  return res.json({ flow: req.body.flow, custom: true });
+whatsappRouter.get('/flows', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await flows.listFlows(companyOf(req)));
 }));
 
-whatsappRouter.delete('/flow', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
-  const companyId = companyOf(req);
-  await settingsService.getSettings(companyId);
-  const settings = await prisma.companySettings.update({ where: { companyId }, data: { botFlow: Prisma.DbNull } });
-  await prisma.whatsAppSession.deleteMany({ where: { companyId, step: 'MENU' } });
-  return res.json({ flow: defaultFlow(settings), custom: false });
+whatsappRouter.post('/flows', requireRole(Role.ADMIN), validate(createFlowSchema), asyncHandler(async (req: Request, res: Response) => {
+  return res.status(201).json(await flows.createFlow(companyOf(req), req.body));
+}));
+
+whatsappRouter.get('/flows/:id', asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await flows.getFlowById(companyOf(req), req.params.id));
+}));
+
+whatsappRouter.put('/flows/:id', requireRole(Role.ADMIN), validate(saveFlowSchema), asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await flows.saveFlow(companyOf(req), req.params.id, req.body));
+}));
+
+whatsappRouter.post('/flows/:id/activate', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await flows.activateFlow(companyOf(req), req.params.id));
+}));
+
+whatsappRouter.delete('/flows/:id', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
+  return res.json(await flows.deleteFlow(companyOf(req), req.params.id));
 }));
 
 // Sora (IA que monta o fluxo): fica em /api/sora (modules/sora), com as
-// conversas salvas. O fluxo que ela devolve é rascunho; quem salva é o PUT /flow.
+// conversas salvas. O fluxo que ela devolve é rascunho; quem salva é o PUT /flows/:id.
 
 // "Testar conversa" com o bot de verdade (fluxo da tela, catálogo e agenda reais).
 // Nada é gravado nem enviado: ver whatsapp.simulator.ts.
