@@ -94,6 +94,17 @@ async function setConnectedFlag(companyId: string, connected: boolean, phone: st
   });
 }
 
+// A flag do banco (usada pelo painel e pelos lembretes) pode ficar para trás da
+// conexão real, por exemplo quando outra instância do backend mexeu na mesma
+// sessão. Se este processo está conectado e o banco discorda, corrige.
+export async function syncConnectedFlag(companyId: string): Promise<void> {
+  const conn = connections.get(companyId);
+  if (!conn?.sock || conn.status !== 'connected') return;
+  const settings = await prisma.companySettings.findUnique({ where: { companyId }, select: { whatsappConnected: true, whatsappPhone: true } });
+  if (settings?.whatsappConnected && settings.whatsappPhone === conn.phone) return;
+  await setConnectedFlag(companyId, true, conn.phone);
+}
+
 export function getConnectionState(companyId: string): WhatsAppConnectionState {
   return publicState(connections.get(companyId));
 }

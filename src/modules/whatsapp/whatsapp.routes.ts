@@ -58,6 +58,7 @@ async function status(companyId: string, base = '') {
     return { status: 'connected' as const, qr: null, phone: official.phone, error: official.lastError, provider: 'cloud' as const, cloud: official };
   }
   const state = connection.getConnectionState(companyId);
+  if (state.status === 'connected') await connection.syncConnectedFlag(companyId);
   const provider = state.status === 'disconnected' ? null : 'qr' as const;
   if (state.status !== 'disconnected' || state.error) return { ...state, provider, cloud: null };
   // Sessão salva, mas ainda não aberta neste processo (ex.: servidor acabou de subir).

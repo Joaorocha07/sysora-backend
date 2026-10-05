@@ -7,6 +7,7 @@ import { authenticate, companyOf, requireCompany } from '../../middlewares/auth.
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { appointmentInclude } from '../appointments/appointments.service';
 import { ACTIVE_STATUSES } from '../appointments/availability';
+import * as connection from '../whatsapp/whatsapp.connection';
 
 // Números do painel inicial da empresa.
 export const dashboardRouter = Router();
@@ -15,6 +16,7 @@ dashboardRouter.use(authenticate, requireCompany, requireActiveSubscription);
 
 dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
   const companyId = companyOf(req);
+  await connection.syncConnectedFlag(companyId);
   const now = new Date();
   const today = toIsoDate(now);
   const monthStart = `${today.slice(0, 8)}01`;
@@ -35,7 +37,7 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
   const [botAppointmentsMonth, unread, settings, weekAppointments, servicesCount, pendingUsers, upcoming] = await Promise.all([
     prisma.appointment.count({ where: { companyId, date: { gte: monthStart }, source: Source.BOT } }),
     prisma.client.aggregate({ where: { companyId }, _sum: { unreadCount: true } }),
-    prisma.companySettings.findUnique({ where: { companyId }, select: { whatsappConnected: true, whatsappPhone: true, botEnabled: true } }),
+    prisma.companySettings.findUnique({ where: { companyId }, select: { whatsappConnected: true, whatsappPhone: true, botEnabled: true, hoursReviewedAt: true } }),
     prisma.appointment.groupBy({
       by: ['date'],
       where: { companyId, date: { gte: toIsoDate(weekAgo), lte: today }, status: { not: AppointmentStatus.CANCELED } },
@@ -68,7 +70,13 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     unreadMessages: unread._sum.unreadCount ?? 0,
     servicesCount,
     pendingUsers,
-    whatsapp: settings ?? { whatsappConnected: false, whatsappPhone: null, botEnabled: false },
+    whatsapp: {
+      whatsappConnected: settings?.whatsappConnected ?? false,
+      whatsappPhone: settings?.whatsappPhone ?? null,
+      botEnabled: settings?.botEnabled ?? false,
+    },
+    // Passo "Confira os horários" dos primeiros passos: o admin já salvou a aba Horários.
+    hoursReviewed: Boolean(settings?.hoursReviewedAt),
     today: todayAppointments,
     upcoming,
     week,

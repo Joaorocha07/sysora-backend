@@ -1,6 +1,9 @@
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 
+// Campos da aba Horários: salvar qualquer um conclui o passo "Confira os horários" do painel.
+const HOUR_FIELDS = ['openingTime', 'closingTime', 'workDays', 'slotMinutes', 'slotCapacity', 'lunchEnabled', 'lunchStart', 'lunchEnd'];
+
 export async function getSettings(companyId: string) {
   return prisma.companySettings.upsert({ where: { companyId }, update: {}, create: { companyId } });
 }
@@ -20,5 +23,6 @@ export async function updateSettings(companyId: string, input: Record<string, un
     if (lunchStart < opening || lunchEnd > closing) throw HttpError.badRequest('O intervalo precisa estar dentro do horário de funcionamento.');
   }
 
-  return prisma.companySettings.update({ where: { companyId }, data: input });
+  const hoursSaved = HOUR_FIELDS.some((key) => key in input);
+  return prisma.companySettings.update({ where: { companyId }, data: hoursSaved ? { ...input, hoursReviewedAt: new Date() } : input });
 }

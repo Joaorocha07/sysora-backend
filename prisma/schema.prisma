@@ -398,6 +398,8 @@ model CompanySettings {
   lunchEnabled Boolean @default(false)
   lunchStart   String  @default("12:00")
   lunchEnd     String  @default("13:00")
+  // Quando o admin salvou os horários pela última vez (passo dos primeiros passos no painel).
+  hoursReviewedAt DateTime?
 
   // WhatsApp conectado pelo QR Code (WhatsApp Web).
   whatsappConnected Boolean @default(false)
