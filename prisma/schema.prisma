@@ -98,6 +98,8 @@ model PlatformSettings {
   publicSignupEnabled Boolean  @default(true)
   // Créditos colocados na conta da Anthropic (centavos de dólar), para o saldo estimado da IA no painel master.
   aiCreditCents       Int      @default(0)
+  // Cotação do dólar (R$ por US$ 1) para mostrar o gasto da IA em reais na página Gastos.
+  usdBrlRate          Float    @default(5.5)
   updatedAt           DateTime @updatedAt
 
   @@map("platform_settings")
@@ -655,4 +657,23 @@ model SoraMessage {
 
   @@index([conversationId, createdAt])
   @@map("sora_messages")
+}
+
+// Gastos da Sysora cadastrados pelo admin master (servidor, domínio, ferramentas...),
+// em reais. Único: entra no mês de `date`. Mensal: entra todo mês de `date` até
+// `endDate` (nulo = continua). O gasto da IA vem de ai_usage, não daqui.
+model Expense {
+  id          String    @id @default(uuid())
+  description String
+  category    String    @default("outros")
+  amountCents Int
+  date        DateTime  @db.Date
+  recurring   Boolean   @default(false)
+  endDate     DateTime? @db.Date
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([date])
+  @@map("expenses")
 }

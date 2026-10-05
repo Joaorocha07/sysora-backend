@@ -12,6 +12,7 @@ import { validate } from '../../middlewares/validate.middleware';
 import { email, password } from '../auth/auth.schema';
 import * as whatsappCloud from '../whatsapp/whatsapp.cloud';
 import * as adminService from './admin.service';
+import * as adminExpenses from './admin.expenses';
 
 const optionalText = z.string().trim().max(120).nullish();
 
@@ -49,6 +50,18 @@ const updateAccountSchema = z.object({
   trialEndsAt: isoDateTime,
   paidUntil: isoDateTime,
   complimentary: z.boolean().optional(),
+});
+
+const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida.');
+const expenseSchema = z.object({
+  description: z.string().trim().min(2, 'Descreva o gasto.').max(120),
+  category: z.enum(adminExpenses.EXPENSE_CATEGORIES),
+  amountCents: z.number().int().positive('Informe o valor.').max(1_000_000_000),
+  date: isoDay,
+  // Mensal: entra todo mês a partir de date, até endDate (nulo = continua).
+  recurring: z.boolean().optional(),
+  endDate: isoDay.nullish(),
+  notes: z.string().trim().max(500).nullish(),
 });
 
 export const adminRouter = Router();
@@ -93,6 +106,8 @@ const platformSettingsSchema = z.object({
   publicSignupEnabled: z.boolean().optional(),
   // Créditos colocados na Anthropic (centavos de dólar), para o saldo estimado da IA.
   aiCreditCents: z.number().int().min(0).max(100_000_000).optional(),
+  // Cotação do dólar (R$ por US$ 1) para o gasto da IA em reais.
+  usdBrlRate: z.number().positive().max(100).optional(),
 });
 
 adminRouter.get('/settings', asyncHandler(async (_req: Request, res: Response) => {
@@ -106,6 +121,25 @@ adminRouter.patch('/settings', validate(platformSettingsSchema), asyncHandler(as
 // Gastos com IA (Sora): créditos, gasto estimado, saldo, por empresa e últimas chamadas.
 adminRouter.get('/ai-usage', asyncHandler(async (_req: Request, res: Response) => {
   return res.json(await adminService.aiUsageSummary());
+}));
+
+// Gastos da Sysora: cadastrados à mão (R$) + IA convertida pela cotação.
+adminRouter.get('/expenses', asyncHandler(async (req: Request, res: Response) => {
+  const month = typeof req.query.month === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(req.query.month) ? req.query.month : undefined;
+  return res.json(await adminExpenses.expensesSummary(month));
+}));
+
+adminRouter.post('/expenses', validate(expenseSchema), asyncHandler(async (req: Request, res: Response) => {
+  return res.status(201).json({ expense: await adminExpenses.createExpense(req.body) });
+}));
+
+adminRouter.patch('/expenses/:id', validate(expenseSchema.partial()), asyncHandler(async (req: Request, res: Response) => {
+  return res.json({ expense: await adminExpenses.updateExpense(req.params.id, req.body) });
+}));
+
+adminRouter.delete('/expenses/:id', asyncHandler(async (req: Request, res: Response) => {
+  await adminExpenses.deleteExpense(req.params.id);
+  return res.status(204).send();
 }));
 
 adminRouter.get('/users',asyncHandler(async (_req: Request, res: Response) => {
