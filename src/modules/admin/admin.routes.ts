@@ -41,6 +41,8 @@ const updateCompanySchema = z.object({
   active: z.boolean().optional(),
   // Recurso "Receber código" (códigos por e-mail no bot), liberado por empresa.
   emailCodesEnabled: z.boolean().optional(),
+  // Assinaturas dos clientes (venda mensal com vencimento), liberadas por empresa.
+  clientSubscriptionsEnabled: z.boolean().optional(),
 });
 
 const isoDateTime = z.string().datetime({ offset: true }).or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).nullish();

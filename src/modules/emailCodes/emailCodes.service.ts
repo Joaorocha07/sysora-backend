@@ -4,6 +4,7 @@ import { HttpError } from '../../lib/httpError';
 import { prisma } from '../../lib/prisma';
 import { addDays, toIsoDate } from '../../lib/time';
 import { ACTIVE_STATUSES } from '../appointments/availability';
+import * as clientSubscriptions from '../clientSubscriptions/clientSubscriptions.service';
 import { FindOptions, FoundCode, findLatestCode, loginErrorMessage, parseSenders, testLogin } from './emailCodes.reader';
 
 // Códigos por e-mail: a empresa cadastra caixas do Gmail e libera cada uma
@@ -143,8 +144,10 @@ export async function codesForClient(companyId: string, clientId: string) {
 // ============ Contas de acesso (produtos com accessEmail) ============
 // O cliente diz o e-mail da conta (pode errar a digitação), o bot acha a
 // conta mais parecida, o cliente pede o código no site e o bot entrega o
-// código que chegou depois do pedido. No primeiro login, registra na agenda o
-// vencimento do acesso (ACCESS_DAYS depois).
+// código que chegou depois do pedido. No primeiro login, registra o
+// vencimento do acesso: com as assinaturas de clientes liberadas, como uma
+// assinatura de 1 mês (clientSubscriptions.service.ts); senão, na agenda
+// (ACCESS_DAYS depois).
 
 export const ACCESS_DAYS = 30;
 export const EXPIRY_NOTE = 'Vencimento do acesso';
@@ -206,9 +209,27 @@ export async function hasInboxFor(companyId: string): Promise<boolean> {
   return (await prisma.emailInbox.count({ where: { companyId, active: true } })) > 0;
 }
 
-// Acesso do cliente = o "vencimento" mais recente dele na agenda: a conta
-// (produto do item) e a data. Vencido quando a data já passou.
-export async function currentAccess(companyId: string, clientId: string, now = new Date()) {
+export type Access = {
+  // Assinatura (subscription = true) ou agendamento de vencimento na agenda.
+  id: string;
+  subscription: boolean;
+  // Vencimento (AAAA-MM-DD).
+  date: string;
+  product: Service | null;
+  expired: boolean;
+};
+
+// Acesso do cliente = a assinatura atual dele (com as assinaturas liberadas)
+// ou o "vencimento" mais recente dele na agenda: a conta (produto) e a data.
+// Vencido quando a data já passou.
+export async function currentAccess(companyId: string, clientId: string, now = new Date()): Promise<Access | null> {
+  if (await clientSubscriptions.isEnabled(companyId)) {
+    const current = await clientSubscriptions.currentSubscription(companyId, clientId, now);
+    if (current) {
+      const { subscription, expired } = current;
+      return { id: subscription.id, subscription: true, date: subscription.dueDate, product: subscription.service, expired };
+    }
+  }
   const appointment = await prisma.appointment.findFirst({
     where: { companyId, clientId, status: { not: AppointmentStatus.CANCELED }, notes: { startsWith: EXPIRY_NOTE } },
     orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
@@ -217,19 +238,25 @@ export async function currentAccess(companyId: string, clientId: string, now = n
   if (!appointment) return null;
   const serviceId = appointment.items[0]?.serviceId;
   const product = serviceId ? await prisma.service.findUnique({ where: { id: serviceId } }) : null;
-  return { appointment, product, expired: appointment.date < toIsoDate(now) };
+  return { id: appointment.id, subscription: false, date: appointment.date, product, expired: appointment.date < toIsoDate(now) };
 }
 
 const loginNote = (product: Service, extra: string) => `${EXPIRY_NOTE}: ${product.name} (${product.accessEmail}). ${extra}`;
 const brFull = (iso: string) => iso.split('-').reverse().join('/');
 
-// Vencimento na agenda: um agendamento só com a data (ACCESS_DAYS depois do
-// primeiro login), com a conta do cliente no item e nas observações, sem
-// lembretes do bot. Se o cliente já tem um acesso em dia, mantém o que existe.
+// Vencimento do acesso a partir do primeiro login. Com as assinaturas
+// liberadas: assinatura de 1 mês (venda feita pelo bot). Senão: um
+// agendamento só com a data (ACCESS_DAYS depois), com a conta do cliente no
+// item e nas observações, sem lembretes do bot. Se o cliente já tem um acesso
+// em dia, mantém o que existe.
 export async function registerExpiry(companyId: string, clientId: string, product: Service, now = new Date()) {
   const access = await currentAccess(companyId, clientId, now);
-  if (access && !access.expired) return { date: access.appointment.date, created: false };
+  if (access && !access.expired) return { date: access.date, created: false };
   const today = toIsoDate(now);
+  if (await clientSubscriptions.isEnabled(companyId)) {
+    const sale = await clientSubscriptions.registerBotSale(companyId, clientId, product, `Conta ${product.accessEmail}. Primeiro login em ${brFull(today)}.`, now);
+    return { date: sale.dueDate, created: true };
+  }
   const date = toIsoDate(addDays(now, ACCESS_DAYS));
   await prisma.appointment.create({
     data: {
@@ -258,11 +285,12 @@ export async function pickAnotherAccount(companyId: string, excludeId: string | 
   const today = toIsoDate(now);
   const products = (await accessProducts(companyId)).filter((p) => p.id !== excludeId);
   const connected = new Set((await prisma.emailInbox.findMany({ where: { companyId, active: true }, select: { email: true } })).map((i) => i.email.toLowerCase()));
+  const subscriptionsOn = await clientSubscriptions.isEnabled(companyId);
   let best: { product: Service; rank: [number, number] } | null = null;
   for (const product of products) {
     const load = await prisma.appointment.count({
       where: { companyId, date: { gte: today }, status: { in: ACTIVE_STATUSES }, notes: { startsWith: EXPIRY_NOTE }, items: { some: { serviceId: product.id } } },
-    });
+    }) + (subscriptionsOn ? await clientSubscriptions.activeClientsOf(companyId, product.id, now) : 0);
     const rank: [number, number] = [connected.has(product.accessEmail!.toLowerCase()) ? 0 : 1, load];
     if (!best || rank[0] < best.rank[0] || (rank[0] === best.rank[0] && rank[1] < best.rank[1])) best = { product, rank };
   }
@@ -270,14 +298,28 @@ export async function pickAnotherAccount(companyId: string, excludeId: string | 
 }
 
 // Troca a conta no vencimento do cliente (mesma data) e registra a anterior.
-export async function switchAccess(appointmentId: string, from: Service | null, to: Service, now = new Date()) {
+export async function switchAccess(access: Access, from: Service | null, to: Service, now = new Date()) {
+  const note = `Trocada em ${brFull(toIsoDate(now))} (não gerava imagem)${from?.accessEmail ? `; conta anterior: ${from.accessEmail}` : ''}.`;
+  if (access.subscription) {
+    // Também os períodos já pagos à frente (renovou antes de vencer).
+    const current = await prisma.clientSubscription.findUniqueOrThrow({ where: { id: access.id } });
+    await prisma.$transaction([
+      prisma.clientSubscription.updateMany({
+        where: { companyId: current.companyId, clientId: current.clientId, canceledAt: null, dueDate: { gte: toIsoDate(now) } },
+        data: { serviceId: to.id, name: to.name },
+      }),
+      prisma.clientSubscription.update({ where: { id: access.id }, data: { notes: [current.notes, `Conta ${to.accessEmail}. ${note}`].filter(Boolean).join(' ') } }),
+    ]);
+    return;
+  }
+  const appointmentId = access.id;
   await prisma.$transaction([
     prisma.appointmentItem.deleteMany({ where: { appointmentId } }),
     prisma.appointment.update({
       where: { id: appointmentId },
       data: {
         totalCents: to.priceCents,
-        notes: loginNote(to, `Trocada em ${brFull(toIsoDate(now))} (não gerava imagem)${from?.accessEmail ? `; conta anterior: ${from.accessEmail}` : ''}.`),
+        notes: loginNote(to, note),
         items: { create: [{ serviceId: to.id, kind: ServiceKind.PRODUCT, name: to.name, durationMinutes: 0, priceCents: to.priceCents }] },
       },
     }),

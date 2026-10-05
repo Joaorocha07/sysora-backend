@@ -158,6 +158,7 @@ model Company {
   whatsappUsage    WhatsAppUsage[]
   emailInboxes     EmailInbox[]
   soraConversations SoraConversation[]
+  clientSubscriptions ClientSubscription[]
   account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
   surveys          OnboardingSurvey[]
@@ -278,6 +279,7 @@ model Client {
   appointments Appointment[]
   messages     Message[]
   emailAccess  ClientEmailAccess[]
+  subscriptions ClientSubscription[]
 
   @@index([companyId])
   @@index([companyId, whatsappId])
@@ -307,6 +309,7 @@ model Service {
 
   company      Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
   appointments AppointmentItem[]
+  subscriptions ClientSubscription[]
 
   @@index([companyId])
   @@map("services")
@@ -404,6 +407,8 @@ model CompanySettings {
   botEnabled          Boolean @default(true)
   // Opção "Receber código" do bot (códigos que chegam por e-mail). Só o admin master liga.
   emailCodesEnabled   Boolean @default(false)
+  // Assinaturas dos clientes (venda mensal com vencimento). Só o admin master liga.
+  clientSubscriptionsEnabled Boolean @default(false)
   autoCreateClient    Boolean @default(true)
   askName             Boolean @default(true)
   greetingMessage     String  @default("Olá, {nome}! Bem-vindo(a) à {empresa}.")
@@ -676,4 +681,37 @@ model Expense {
 
   @@index([date])
   @@map("expenses")
+}
+
+// Assinatura de um cliente da empresa (produto vendido por mês, ex.: conta de
+// acesso). Cada linha é um período pago: data da compra e vencimento
+// (AAAA-MM-DD, fuso da empresa). Renovar cria um período novo; a assinatura
+// atual do cliente é o período não cancelado com o maior vencimento.
+// Recurso liberado por empresa pelo admin master (clientSubscriptionsEnabled).
+model ClientSubscription {
+  id         String    @id @default(uuid())
+  companyId  String
+  clientId   String
+  // Produto vendido (nulo se foi apagado do catálogo). name e priceCents
+  // guardam o que valia na venda.
+  serviceId  String?
+  name       String
+  priceCents Int       @default(0)
+  startDate  String
+  dueDate    String
+  source     Source    @default(STAFF)
+  notes      String?
+  canceledAt DateTime?
+  // Quando o bot avisou o cliente que venceu (whatsapp.jobs.ts), para avisar uma vez só.
+  expiredNoticeAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  company Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  service Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, dueDate])
+  @@index([clientId])
+  @@map("client_subscriptions")
 }

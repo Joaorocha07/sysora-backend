@@ -1,4 +1,4 @@
-import { AppointmentStatus, CompanySettings, MessageSender, Service, ServiceKind, Source } from '@prisma/client';
+import { AppointmentStatus, Client, ClientSubscription, CompanySettings, MessageSender, Service, ServiceKind, Source } from '@prisma/client';
 import { env } from '../../config/env';
 import { hasAi, isAccountActive } from '../../lib/plans';
 import { botAiConfigured } from '../../lib/llm';
@@ -11,7 +11,7 @@ import { freeTimes, isTimeFree, nextFreeDays } from '../appointments/availabilit
 import { Understanding, understand } from './whatsapp.ai';
 import { FlowAction, FlowNode, findNode, getFlow } from './whatsapp.flow';
 import { OPT_OUT, OPT_OUT_HINT, shouldStaySilent, sleep, takeCodeRequest } from './whatsapp.safety';
-import { ACCESS_DAYS, accessProducts, codeForAccount, codesForClient, currentAccess, hasInboxFor, pickAnotherAccount, registerExpiry, switchAccess } from '../emailCodes/emailCodes.service';
+import { accessProducts, codeForAccount, codesForClient, currentAccess, hasInboxFor, pickAnotherAccount, registerExpiry, switchAccess } from '../emailCodes/emailCodes.service';
 
 // Chatbot do WhatsApp. Toda mensagem recebida: encontra (ou cria) o cliente
 // pelo número, salva a mensagem na conversa dele e, se o bot estiver ligado,
@@ -557,6 +557,22 @@ export async function sendHourReminder(settings: CompanySettings, companyName: s
   if (askConfirmation) await setSession(ctx, 'CONFIRM', { appointmentId: appointment.id });
 }
 
+// Assinatura vencida (assinaturas de clientes; chamado por whatsapp.jobs.ts,
+// dentro do lock do contato): avisa uma vez e pede para renovar.
+const RENEW_WORDS = /\brenov/;
+export async function sendSubscriptionExpired(settings: CompanySettings, companyName: string, subscription: ClientSubscription & { client: Client }, send: SendText) {
+  const { client } = subscription;
+  const ctx: BotContext = { companyId: subscription.companyId, companyName, waId: client.whatsappId!, send, settings, clientId: client.id };
+  const name = isPlaceholderName(client.name) ? '' : firstName(client.name);
+  await say(ctx, blocks(
+    `Oi${name ? `, ${name}` : ''}! Sua assinatura *${subscription.name}* venceu em ${fullBrDate(subscription.dueDate)}.`,
+    'Para continuar usando, é só renovar: responda *renovar* que a nossa equipe te passa o pagamento.',
+    OPT_OUT_HINT,
+  ));
+  await prisma.clientSubscription.update({ where: { id: subscription.id }, data: { expiredNoticeAt: new Date() } });
+  await setSession(ctx, 'MENU', { idle: true });
+}
+
 // Áudio -> texto, quando a transcrição está ligada e configurada no servidor.
 async function audioText(ctx: BotContext, audio: IncomingWhatsAppMessage['audio']): Promise<string | null> {
   if (!audio || !ctx.ai || !ctx.settings.transcribeAudio || !transcriptionEnabled() || audio.seconds > env.TRANSCRIBE_MAX_SECONDS) return null;
@@ -610,6 +626,12 @@ async function processMessage(ctx: BotContext, message: IncomingWhatsAppMessage)
   }
   // Com a equipe atendendo, a mensagem fica como não lida para ela ver.
   if (session?.step !== 'HUMAN') message.typing?.().catch(() => {});
+
+  // "Renovar" (resposta ao aviso de assinatura vencida): a equipe passa o pagamento.
+  if (text && settings.clientSubscriptionsEnabled && session?.step !== 'HUMAN' && RENEW_WORDS.test(normalize(text))) {
+    await handOff(ctx, 'Ótimo! Vou chamar a equipe para te passar o pagamento da renovação.');
+    return;
+  }
 
   const name = firstName(isPlaceholderName(client?.name) ? profileName : client?.name);
   if (!session) {
@@ -969,11 +991,11 @@ async function deliverCode(ctx: BotContext, data: SessionData, prefix?: string) 
   if ((await accessProducts(ctx.companyId)).length) {
     const access = await currentAccess(ctx.companyId, ctx.clientId);
     if (access?.expired) {
-      await expiredAccess(ctx, access.appointment.date, prefix);
+      await expiredAccess(ctx, access.date, prefix);
       return;
     }
     if (access?.product?.accessEmail) {
-      await startCodeWait(ctx, data, access.product, blocks(prefix, `Sua conta de acesso é válida até ${fullBrDate(access.appointment.date)}.`));
+      await startCodeWait(ctx, data, access.product, blocks(prefix, `Sua conta de acesso é válida até ${fullBrDate(access.date)}.`));
       return;
     }
     const product = await pickAnotherAccount(ctx.companyId, null);
@@ -982,7 +1004,7 @@ async function deliverCode(ctx: BotContext, data: SessionData, prefix?: string) 
       return;
     }
     const expiry = await registerExpiry(ctx.companyId, ctx.clientId, product);
-    await startCodeWait(ctx, data, product, blocks(prefix, `Pronto! Separei uma conta de acesso para você, válida por ${ACCESS_DAYS} dias (até ${fullBrDate(expiry.date)}).`));
+    await startCodeWait(ctx, data, product, blocks(prefix, `Pronto! Separei uma conta de acesso para você, válida até ${fullBrDate(expiry.date)}.`));
     return;
   }
   if (!takeCodeRequest(ctx.companyId, ctx.waId)) {
@@ -1078,7 +1100,7 @@ async function switchAccount(ctx: BotContext, data: SessionData, prefix?: string
     return;
   }
   if (access.expired) {
-    await expiredAccess(ctx, access.appointment.date, prefix);
+    await expiredAccess(ctx, access.date, prefix);
     return;
   }
   const next = await pickAnotherAccount(ctx.companyId, access.product?.id ?? null);
@@ -1086,8 +1108,8 @@ async function switchAccount(ctx: BotContext, data: SessionData, prefix?: string
     await handOff(ctx, blocks(prefix, 'No momento não tenho outra conta disponível. Vou te passar para a equipe.'));
     return;
   }
-  await switchAccess(access.appointment.id, access.product, next);
-  await startCodeWait(ctx, data, next, blocks(prefix, `Troquei a sua conta. Seu acesso continua até ${fullBrDate(access.appointment.date)}.`));
+  await switchAccess(access, access.product, next);
+  await startCodeWait(ctx, data, next, blocks(prefix, `Troquei a sua conta. Seu acesso continua até ${fullBrDate(access.date)}.`));
 }
 
 const waitingFor = async (ctx: BotContext, waitId: string) => {
@@ -1125,9 +1147,7 @@ async function sendAccountCode(ctx: BotContext, productId: string, waitId: strin
   await say(ctx, blocks(
     found.code ? `Seu código:\n*${found.code}*` : `Toque no link para continuar:\n${found.link}`,
     'Ele vale por poucos minutos. Não compartilhe com ninguém.',
-    expiry && (expiry.created
-      ? `Seu acesso de ${ACCESS_DAYS} dias vai até ${fullBrDate(expiry.date)}.`
-      : `Seu acesso vai até ${fullBrDate(expiry.date)}.`),
+    expiry && `Seu acesso vai até ${fullBrDate(expiry.date)}.`,
   ));
 }
 

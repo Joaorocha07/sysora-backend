@@ -4,8 +4,9 @@ import { schemaState } from '../../lib/schemaGuard';
 import { prisma } from '../../lib/prisma';
 import { addDays, dateTime, pad, toIsoDate } from '../../lib/time';
 import { appointmentInclude, AppointmentWithRelations } from '../appointments/appointments.service';
+import { currentSubscription } from '../clientSubscriptions/clientSubscriptions.service';
 import { ACTIVE_STATUSES } from '../appointments/availability';
-import { endIdleHumanSession, humanSessionEndsAt, SendText, sendDayBeforeReminder, sendHourReminder, withContactLock } from './whatsapp.bot';
+import { endIdleHumanSession, humanSessionEndsAt, SendText, sendDayBeforeReminder, sendHourReminder, sendSubscriptionExpired, withContactLock } from './whatsapp.bot';
 import { customerWindowOpen, getCloudAccount, sendReminderTemplate, templateApproved } from './whatsapp.cloud';
 import { findWhatsAppJid } from './whatsapp.connection';
 import { sleep, takeFirstContact } from './whatsapp.safety';
@@ -17,6 +18,9 @@ import { isReady, sendText } from './whatsapp.transport';
 //     (não vai para horários marcados no mesmo dia do lembrete);
 //   * pouco antes: hourReminderMinutes antes do horário.
 // - Atendimento pela equipe parado: encerra e devolve o cliente ao bot.
+// - Assinaturas de clientes (empresas com clientSubscriptionsEnabled): no dia
+//   seguinte ao vencimento, a partir de reminderTime, avisa o cliente que
+//   venceu e pede para renovar (uma vez por período, se ele não renovou).
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 // Espaço entre um lembrete e outro (sorteado), para não disparar tudo de uma vez.
@@ -113,6 +117,76 @@ export async function sendDueReminders(now = new Date()): Promise<number> {
   return sent;
 }
 
+// Só avisa vencimentos recentes (não dispara para assinaturas vencidas há muito tempo).
+const EXPIRED_NOTICE_DAYS = 7;
+let sendingExpiredNotices = false;
+
+export async function sendExpiredSubscriptionNotices(now = new Date()): Promise<number> {
+  if (sendingExpiredNotices) return 0;
+  sendingExpiredNotices = true;
+  let sent = 0;
+  try {
+    const today = toIsoDate(now);
+    const companies = await prisma.companySettings.findMany({
+      where: { clientSubscriptionsEnabled: true, whatsappConnected: true, botEnabled: true, company: { active: true } },
+      include: { company: { select: { name: true, account: true } } },
+    });
+
+    for (const settings of companies) {
+      if (`${pad(now.getHours())}:${pad(now.getMinutes())}` < settings.reminderTime) continue;
+      if (!(await isReady(settings.companyId)) || !isAccountActive(settings.company.account)) continue;
+      const cloudAccount = await getCloudAccount(settings.companyId);
+      const candidates = await prisma.clientSubscription.findMany({
+        where: {
+          companyId: settings.companyId,
+          canceledAt: null,
+          expiredNoticeAt: null,
+          dueDate: { lt: today, gte: toIsoDate(addDays(now, -EXPIRED_NOTICE_DAYS)) },
+          client: { whatsappId: { not: null }, whatsappOptOutAt: null },
+        },
+        include: { client: true },
+      });
+
+      for (const candidate of candidates) {
+        try {
+          let notified = false;
+          await withContactLock(settings.companyId, candidate.client.whatsappId!, async () => {
+            // Renovou (tem um período mais novo) ou já foi avisado enquanto esperava na fila.
+            const current = await currentSubscription(settings.companyId, candidate.clientId, new Date());
+            const subscription = await prisma.clientSubscription.findUnique({ where: { id: candidate.id }, include: { client: true } });
+            if (!subscription || subscription.expiredNoticeAt || subscription.canceledAt) return;
+            if (current?.subscription.id !== subscription.id || !current.expired) {
+              await prisma.clientSubscription.update({ where: { id: subscription.id }, data: { expiredNoticeAt: new Date() } });
+              return;
+            }
+            let send: SendText = (text) => sendText(settings.companyId, subscription.client.whatsappId!, text);
+            if (cloudAccount) {
+              // API oficial: texto livre só dentro da janela de 24 h da última mensagem do cliente.
+              if (subscription.client.whatsappId!.includes('@') || !(await customerWindowOpen(settings.companyId, subscription.clientId))) return;
+            } else {
+              const wrote = await prisma.message.findFirst({ where: { clientId: subscription.clientId, sender: 'CLIENT' }, select: { id: true } });
+              if (!wrote) {
+                const jid = await findWhatsAppJid(settings.companyId, subscription.client.whatsappId!.replace(/\D/g, ''));
+                if (!jid || !takeFirstContact(settings.companyId)) return;
+                send = (text) => sendText(settings.companyId, jid, text);
+              }
+            }
+            await sendSubscriptionExpired(settings, settings.company.name, subscription, send);
+            notified = true;
+            sent += 1;
+          });
+          if (notified) await sleep(betweenReminders());
+        } catch (err) {
+          console.error('Falha ao avisar assinatura vencida pelo WhatsApp:', err);
+        }
+      }
+    }
+  } finally {
+    sendingExpiredNotices = false;
+  }
+  return sent;
+}
+
 let closingHandoffs = false;
 
 export async function closeIdleHandoffs(): Promise<number> {
@@ -144,8 +218,10 @@ export function startWhatsAppJobs(): void {
   // Banco desatualizado (schemaGuard): não roda, para não encher o log de erros.
   const reminders = () => { if (!schemaState.ok) return; sendDueReminders().catch((err) => console.error('Falha ao verificar lembretes do WhatsApp:', err)); };
   const handoffs = () => { if (!schemaState.ok) return; closeIdleHandoffs().catch((err) => console.error('Falha ao verificar atendimentos do WhatsApp:', err)); };
+  const expired = () => { if (!schemaState.ok) return; sendExpiredSubscriptionNotices().catch((err) => console.error('Falha ao verificar assinaturas vencidas:', err)); };
   // Primeira verificação depois que as conexões tiveram tempo de reabrir.
-  setTimeout(() => { reminders(); handoffs(); }, 60_000);
+  setTimeout(() => { reminders(); handoffs(); expired(); }, 60_000);
   setInterval(reminders, CHECK_INTERVAL_MS);
   setInterval(handoffs, CHECK_INTERVAL_MS);
+  setInterval(expired, CHECK_INTERVAL_MS);
 }
