@@ -30,17 +30,19 @@ const monthStart = () => {
 export async function stats() {
   const [companies, accounts, users, clients, appointmentsThisMonth, connected] = await Promise.all([
     prisma.company.count({ where: customerCompany }),
-    prisma.account.findMany({ where: { companies: { some: customerCompany } }, select: { plan: true, status: true, trialEndsAt: true, paidUntil: true } }),
+    prisma.account.findMany({ where: { companies: { some: customerCompany } }, select: { plan: true, status: true, trialEndsAt: true, paidUntil: true, complimentary: true } }),
     prisma.user.count({ where: { isSuperAdmin: false } }),
     prisma.client.count({ where: { company: customerCompany } }),
     prisma.appointment.count({ where: { company: customerCompany, date: { gte: monthStart() }, status: { not: AppointmentStatus.CANCELED } } }),
     prisma.companySettings.count({ where: { company: customerCompany, whatsappConnected: true } }),
   ]);
-  const paying = accounts.filter((a) => a.status === SubscriptionStatus.ACTIVE && isAccountActive(a));
+  // Cortesia (teste, parceiro) tem o plano ativo mas não é venda.
+  const paying = accounts.filter((a) => a.status === SubscriptionStatus.ACTIVE && isAccountActive(a) && !a.complimentary);
   return {
     companies,
     accounts: accounts.length,
     payingAccounts: paying.length,
+    complimentaryAccounts: accounts.filter((a) => a.complimentary && isAccountActive(a)).length,
     trialAccounts: accounts.filter((a) => a.status === SubscriptionStatus.TRIAL && isAccountActive(a)).length,
     // Receita mensal recorrente das contas pagas.
     mrrCents: paying.reduce((sum, a) => sum + PLANS[a.plan].priceCents, 0),
@@ -172,7 +174,7 @@ async function accountCompanies(accountId: string) {
 }
 
 // Plano e status da assinatura (ajuste manual pelo master).
-export async function updateAccount(accountId: string, input: { plan?: Plan; status?: SubscriptionStatus; trialEndsAt?: string | null; paidUntil?: string | null }) {
+export async function updateAccount(accountId: string, input: { plan?: Plan; status?: SubscriptionStatus; trialEndsAt?: string | null; paidUntil?: string | null; complimentary?: boolean }) {
   const account = await prisma.account.findUnique({ where: { id: accountId } });
   if (!account) throw HttpError.notFound('Conta não encontrada.');
   const companyIds = await accountCompanies(accountId);
@@ -186,6 +188,7 @@ export async function updateAccount(accountId: string, input: { plan?: Plan; sta
       status: input.status,
       trialEndsAt: input.trialEndsAt === undefined ? undefined : input.trialEndsAt ? new Date(input.trialEndsAt) : null,
       paidUntil: input.paidUntil === undefined ? undefined : input.paidUntil ? new Date(input.paidUntil) : null,
+      complimentary: input.complimentary,
     },
   });
   invalidateSubscriptionCache(companyIds);

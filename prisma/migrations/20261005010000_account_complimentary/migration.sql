@@ -1,0 +1,1 @@
+ALTER TABLE "accounts" ADD COLUMN IF NOT EXISTS "complimentary" BOOLEAN NOT NULL DEFAULT false;

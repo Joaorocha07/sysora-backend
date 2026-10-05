@@ -83,6 +83,8 @@ export function subscriptionSummary(account: Account) {
     maxCompanies: plan.maxCompanies,
     maxEmployees: plan.maxEmployees,
     ai: hasAi(account),
+    // Cortesia: plano liberado sem cobrança (não é venda).
+    complimentary: account.complimentary,
   };
 }
 

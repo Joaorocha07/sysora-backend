@@ -1,10 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { CompanySettings, Service } from '@prisma/client';
 import * as z from 'zod/v4';
-import { env } from '../../config/env';
+import { countQuota, quotaUsage } from '../../lib/aiQuota';
 import { recordAiUsage } from '../../lib/aiUsage';
-import { prisma, prismaBase } from '../../lib/prisma';
+import { botAiConfigured, structured } from '../../lib/llm';
 import { addDays, durationLabel, toIsoDate } from '../../lib/time';
 import { FlowNode } from './whatsapp.flow';
 
@@ -15,8 +13,8 @@ import { FlowNode } from './whatsapp.flow';
 // horários reais: a IA só interpreta, nunca confirma nada sozinha.
 //
 // Para sair barato, ela só é chamada quando o número, o nome da opção e as
-// palavras-chave não resolveram, usa um modelo pequeno (BOT_AI_MODEL) e tem
-// limite mensal por empresa (BOT_AI_MONTHLY_LIMIT).
+// palavras-chave não resolveram, usa um modelo pequeno (BOT_AI_MODEL, de
+// qualquer fornecedor: lib/llm.ts) e tem limite mensal por conta (BOT_AI_MONTHLY_LIMIT).
 
 const WEEKDAYS = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
 const MAX_TEXT = 600;
@@ -53,25 +51,13 @@ export type UnderstandInput = {
   text: string;
 };
 
-let client: Anthropic | null = null;
-
-const monthKey = (d = new Date()) => d.toISOString().slice(0, 7);
-
+// Limite mensal por conta (as empresas da conta dividem): lib/aiQuota.ts.
+// Conta mesmo dentro do simulador do bot, porque a chamada foi paga.
 export async function botAiUsage(companyId: string) {
-  const settings = await prisma.companySettings.findUnique({ where: { companyId }, select: { botAiMonth: true, botAiCount: true } });
-  const used = settings?.botAiMonth === monthKey() ? settings.botAiCount : 0;
-  return { used, limit: env.BOT_AI_MONTHLY_LIMIT, available: Boolean(env.ANTHROPIC_API_KEY) };
+  return { ...(await quotaUsage(companyId, 'botAi')), available: botAiConfigured() };
 }
 
-// Conta no limite do mês mesmo dentro do simulador do bot (prismaBase: fora da transação desfeita).
-export async function countUse(companyId: string) {
-  const month = monthKey();
-  const settings = await prismaBase.companySettings.findUniqueOrThrow({ where: { companyId }, select: { botAiMonth: true } });
-  await prismaBase.companySettings.update({
-    where: { companyId },
-    data: settings.botAiMonth === month ? { botAiCount: { increment: 1 } } : { botAiMonth: month, botAiCount: 1 },
-  });
-}
+export const countUse = (companyId: string) => countQuota(companyId, 'botAi');
 
 const money = (cents: number) => (cents / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const numbered = (items: string[]) => items.map((item, i) => `${i + 1}) ${item}`).join('\n');
@@ -103,7 +89,7 @@ Campos:
   - "outro": não dá para entender.
 - option: número da opção da lista mostrada que corresponde ao pedido, ou null. Se a intenção for uma ação (agendar, meus, remarcar...) e existir uma opção na lista que faz isso, preencha também o número dela.
 - services: números (da lista de serviços) dos serviços citados. Vazio se não citou. Produtos não entram aqui: eles não são agendados.
-- date: dia pedido no formato AAAA-MM-DD, calculado a partir de "hoje" ("amanhã", "sexta", "dia 10", "semana que vem na terça"). null se não falou de dia. Nunca uma data passada.
+- date: dia pedido no formato AAAA-MM-DD ("amanhã", "sexta", "dia 10", "semana que vem na terça"). Copie a data da lista "Próximos dias" em vez de calcular: "sexta" é a primeira sexta da lista. null se não falou de dia. Nunca uma data passada.
 - time: horário pedido no formato HH:MM ("às 3 da tarde" = 15:00, "14h30" = 14:30). Se disse só um período ("de manhã", "à tarde"), use null.
 - answer: só para "pergunta". Responda em português do Brasil, em 1 ou 2 frases curtas e simpáticas, usando apenas as informações da empresa abaixo. Se a informação não estiver lá, diga que vai verificar com a equipe. Nunca invente preço, endereço, horário ou política. Para os outros intents, null.
 
@@ -125,6 +111,8 @@ function context(input: UnderstandInput): string {
   const info = flowInfo(input.flow);
   return [
     `Hoje: ${WEEKDAYS[today.getDay()]}, ${toIsoDate(today)} (amanhã: ${toIsoDate(addDays(today, 1))}).`,
+    // Calendário pronto: modelos pequenos erram ao calcular o dia da semana.
+    `Próximos dias (use para "sexta", "semana que vem na terça", "dia 20"...):\n${Array.from({ length: 31 }, (_, i) => { const d = addDays(today, i + 1); return `${WEEKDAYS[d.getDay()]} ${toIsoDate(d)}`; }).join('\n')}`,
     `Empresa: ${input.companyName}`,
     `Atendimento: ${hours}`,
     `Serviços:\n${services}`,
@@ -139,13 +127,13 @@ function context(input: UnderstandInput): string {
 // Devolve null quando a IA está desligada, sem chave, no limite do mês ou com
 // erro: o bot então segue como antes ("Não entendi" + opções).
 export async function understand(input: UnderstandInput): Promise<Understanding | null> {
-  if (!env.ANTHROPIC_API_KEY || !input.settings.botAiEnabled || !input.text.trim()) return null;
+  if (!botAiConfigured() || !input.settings.botAiEnabled || !input.text.trim()) return null;
   const usage = await botAiUsage(input.companyId);
   if (usage.used >= usage.limit) return null;
 
   try {
-    const { result, response } = await interpret(input);
-    await recordAiUsage(input.companyId, 'bot', response.model, response.usage);
+    const { result, model, usage: tokens } = await interpret(input);
+    await recordAiUsage(input.companyId, 'bot', model, tokens);
     await countUse(input.companyId);
     return result;
   } catch (err) {
@@ -154,18 +142,11 @@ export async function understand(input: UnderstandInput): Promise<Understanding 
   }
 }
 
-// Só a chamada ao modelo (sem limite nem registro de uso).
+// Só a chamada ao modelo (sem limite nem registro de uso). Também usada pelo
+// teste de qualidade dos modelos (scripts/bot-ai-bench.ts).
 export async function interpret(input: UnderstandInput) {
-  client ??= new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const response = await client.beta.messages.parse({
-    model: env.BOT_AI_MODEL,
-    max_tokens: 400,
-    system: INSTRUCTIONS,
-    messages: [{ role: 'user', content: context(input) }],
-    output_config: { format: betaZodOutputFormat(understandingSchema) },
-  });
-  const ok = response.stop_reason !== 'refusal' && response.parsed_output;
-  return { result: ok ? sanitize(response.parsed_output!, input) : null, response };
+  const response = await structured({ system: INSTRUCTIONS, user: context(input), schema: understandingSchema, name: 'understanding', maxTokens: 400 });
+  return { result: response.data ? sanitize(response.data, input) : null, model: response.model, usage: response.usage };
 }
 
 // Descarta o que não cabe nas listas mostradas ou não é uma data/hora válida.

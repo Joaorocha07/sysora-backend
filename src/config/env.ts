@@ -67,13 +67,25 @@ const schema = z.object({
   // Sora: assistente de IA (Claude) que monta o fluxo do bot. Sem a chave, o
   // botão da Sora avisa que não está configurada e o editor manual segue normal.
   ANTHROPIC_API_KEY: z.string().optional(),
-  SORA_MODEL: z.string().default('claude-opus-5-5'),
-  // Pedidos à Sora por empresa por mês (cada mensagem no chat conta 1).
-  SORA_MONTHLY_LIMIT: z.coerce.number().int().positive().default(50),
+  // Sonnet: metade do preço do Opus e suficiente para montar fluxos.
+  SORA_MODEL: z.string().default('claude-sonnet-5-5'),
+  // Pedidos à Sora por conta por mês (cada mensagem no chat conta 1; as empresas da conta dividem).
+  SORA_MONTHLY_LIMIT: z.coerce.number().int().positive().default(60),
   // IA do atendimento: entende o que o cliente escreveu quando não é um número
   // nem uma palavra-chave (whatsapp.ai.ts). Modelo barato e rápido; mesma chave da Sora.
   BOT_AI_MODEL: z.string().default('claude-haiku-4-5'),
-  // Mensagens interpretadas pela IA por empresa por mês. Passou disso, o bot volta a pedir o número.
+  // Fornecedor do modelo barato (lib/llm.ts): "anthropic" (padrão) ou "openai" =
+  // qualquer API compatível com a da OpenAI (Gemini, DeepSeek, Groq, OpenRouter...).
+  BOT_AI_PROVIDER: z.enum(['anthropic', 'openai']).default('anthropic'),
+  // Só com BOT_AI_PROVIDER=openai. Ex.: https://generativelanguage.googleapis.com/v1beta/openai
+  BOT_AI_BASE_URL: z.string().url().optional(),
+  BOT_AI_API_KEY: z.string().optional(),
+  // Campos extras no pedido, em JSON (ex.: {"reasoning_effort":"low"}).
+  BOT_AI_EXTRA_BODY: z.string().optional(),
+  // Preço (US$ por milhão de tokens) de um modelo que não está em lib/aiPricing.ts.
+  BOT_AI_USD_PER_M_INPUT: z.coerce.number().nonnegative().optional(),
+  BOT_AI_USD_PER_M_OUTPUT: z.coerce.number().nonnegative().optional(),
+  // Mensagens interpretadas pela IA por conta por mês (as empresas da conta dividem). Passou disso, o bot volta a pedir o número.
   BOT_AI_MONTHLY_LIMIT: z.coerce.number().int().positive().default(1500),
 
   // Transcrição de áudio (API compatível com a da OpenAI: Groq, OpenAI...).

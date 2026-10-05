@@ -16,7 +16,6 @@ import * as connection from './whatsapp.connection';
 import { defaultFlow, findNode, flowSchema, getFlow } from './whatsapp.flow';
 import * as simulator from './whatsapp.simulator';
 import { takeTestSend } from './whatsapp.safety';
-import * as sora from './whatsapp.sora';
 
 const saveFlowSchema = z.object({ flow: flowSchema });
 
@@ -27,13 +26,6 @@ const understandSchema = z.object({
   text: z.string().trim().min(1, 'Escreva uma mensagem.').max(600),
 });
 
-const soraSchema = z.object({
-  messages: z.array(z.object({
-    role: z.enum(['user', 'assistant']),
-    text: z.string().trim().min(1).max(2000, 'Mensagem muito longa para a Sora (até 2000 caracteres).'),
-  })).min(1).max(40),
-  flow: flowSchema,
-});
 
 const sendTestSchema = z.object({
   to: z.string().trim().min(8, 'Informe um número de WhatsApp válido.'),
@@ -177,15 +169,8 @@ whatsappRouter.delete('/flow', requireRole(Role.ADMIN), asyncHandler(async (req:
   return res.json({ flow: defaultFlow(settings), custom: false });
 }));
 
-// Sora (IA que monta o fluxo): uso do mês e conversa. A resposta traz um fluxo
-// em rascunho; quem salva é o PUT /flow, depois que o dono revisa no editor.
-whatsappRouter.get('/flow/sora', requireRole(Role.ADMIN), asyncHandler(async (req: Request, res: Response) => {
-  return res.json(await sora.soraUsage(companyOf(req)));
-}));
-
-whatsappRouter.post('/flow/sora', requireRole(Role.ADMIN), validate(soraSchema), asyncHandler(async (req: Request, res: Response) => {
-  return res.json(await sora.askSora(companyOf(req), req.body.messages, req.body.flow));
-}));
+// Sora (IA que monta o fluxo): fica em /api/sora (modules/sora), com as
+// conversas salvas. O fluxo que ela devolve é rascunho; quem salva é o PUT /flow.
 
 // "Testar conversa" com o bot de verdade (fluxo da tela, catálogo e agenda reais).
 // Nada é gravado nem enviado: ver whatsapp.simulator.ts.

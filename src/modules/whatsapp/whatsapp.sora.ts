@@ -3,6 +3,7 @@ import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import * as z from 'zod/v4';
 import { env } from '../../config/env';
 import { companyHasAi, requireAiPlan } from '../../lib/aiAccess';
+import { countQuota, quotaUsage } from '../../lib/aiQuota';
 import { recordAiUsage } from '../../lib/aiUsage';
 import { HttpError } from '../../lib/httpError';
 import { prisma } from '../../lib/prisma';
@@ -34,15 +35,34 @@ const soraNode = z.object({
 });
 type SoraNode = z.infer<typeof soraNode>;
 
+// Mudança proposta no catálogo (serviços e produtos). Só vale depois que o
+// dono confirma no chat (sora.service.ts aplica).
+const catalogChange = z.object({
+  op: z.enum(['create', 'update']),
+  // update: id do serviço/produto existente (dos dados da empresa); create: null.
+  id: z.string().nullable(),
+  kind: z.enum(['SERVICE', 'PRODUCT']),
+  name: z.string(),
+  description: z.string().nullable(),
+  priceCents: z.number().int().nullable(),
+  durationMinutes: z.number().int().nullable(),
+  active: z.boolean().nullable(),
+});
+export type CatalogChange = z.infer<typeof catalogChange>;
+
 const soraOutput = z.object({
   // Resposta para o dono, em português, curta.
   reply: z.string(),
   // Fluxo completo quando a Sora criou ou mudou algo; null quando só respondeu ou perguntou.
   flow: z.array(soraNode).nullable(),
+  // Serviços/produtos a cadastrar ou alterar; null quando não mexe no catálogo.
+  catalog: z.array(catalogChange).nullable(),
 });
 
 export type SoraMessage = { role: 'user' | 'assistant'; text: string };
-export type SoraResult = { reply: string; flow: FlowNode | null; usage: { used: number; limit: number; allowed: boolean } };
+export type SoraResult = { reply: string; flow: FlowNode | null; catalog: CatalogChange[] | null; usage: { used: number; limit: number; allowed: boolean } };
+// chat: menu Sora (conversa livre, catálogo e fluxo). fluxo: painel do editor do fluxo.
+export type SoraMode = 'chat' | 'fluxo';
 
 let client: Anthropic | null = null;
 function anthropic(): Anthropic {
@@ -51,22 +71,12 @@ function anthropic(): Anthropic {
   return client;
 }
 
-const monthKey = (d = new Date()) => d.toISOString().slice(0, 7);
-
+// Limite mensal por conta (as empresas da conta dividem): lib/aiQuota.ts.
 export async function soraUsage(companyId: string) {
-  const settings = await prisma.companySettings.findUnique({ where: { companyId }, select: { soraMonth: true, soraCount: true } });
-  const used = settings?.soraMonth === monthKey() ? settings.soraCount : 0;
-  return { used, limit: env.SORA_MONTHLY_LIMIT, enabled: Boolean(env.ANTHROPIC_API_KEY), allowed: await companyHasAi(companyId) };
+  return { ...(await quotaUsage(companyId, 'sora')), enabled: Boolean(env.ANTHROPIC_API_KEY), allowed: await companyHasAi(companyId) };
 }
 
-async function countUse(companyId: string) {
-  const month = monthKey();
-  const settings = await prisma.companySettings.findUniqueOrThrow({ where: { companyId }, select: { soraMonth: true } });
-  await prisma.companySettings.update({
-    where: { companyId },
-    data: settings.soraMonth === month ? { soraCount: { increment: 1 } } : { soraMonth: month, soraCount: 1 },
-  });
-}
+const countUse = (companyId: string) => countQuota(companyId, 'sora');
 
 // Árvore -> lista plana (o que a Sora lê e devolve).
 export function flatten(root: FlowNode): SoraNode[] {
@@ -120,24 +130,25 @@ function money(cents: number) {
 async function companyContext(companyId: string): Promise<string> {
   const company = await prisma.company.findUniqueOrThrow({
     where: { id: companyId },
-    include: { settings: true, services: { where: { active: true }, orderBy: [{ position: 'asc' }, { name: 'asc' }] } },
+    include: { settings: true, services: { orderBy: [{ position: 'asc' }, { name: 'asc' }] } },
   });
   const s = company.settings;
   const services = company.services.length
-    ? company.services.map((sv) => `- ${sv.name}: ${money(sv.priceCents)}, ${sv.kind === 'PRODUCT' ? 'produto de pronta entrega (não é agendado)' : `${sv.durationMinutes} min`}${sv.description ? ` (${sv.description})` : ''}`).join('\n')
+    ? company.services.map((sv) => `- [id ${sv.id}] ${sv.kind === 'PRODUCT' ? 'PRODUTO' : 'SERVIÇO'} ${sv.name}: ${sv.priceCents ? money(sv.priceCents) : 'sem preço'}, ${sv.kind === 'PRODUCT' ? 'pronta entrega (não é agendado)' : `${sv.durationMinutes} min`}${sv.active ? '' : ', INATIVO'}${sv.description ? ` (${sv.description})` : ''}`).join('\n')
     : '- (nenhum serviço cadastrado ainda)';
   const hours = s
     ? `${s.workDays.map((d) => WEEKDAYS[d]).join(', ')}, das ${s.openingTime} às ${s.closingTime}${s.lunchEnabled ? `, com intervalo das ${s.lunchStart} às ${s.lunchEnd}` : ''}`
     : '(não configurado)';
   return [
     `Empresa: ${company.name}`,
-    `Serviços ativos:\n${services}`,
+    `Catálogo (serviços e produtos):\n${services}`,
     `Horário de atendimento: ${hours}`,
     s ? `Mensagem de boas-vindas atual: "${s.greetingMessage}"` : '',
   ].filter(Boolean).join('\n\n');
 }
 
-const INSTRUCTIONS = `Você é a Sora, assistente da Sysora (sistema de agendamento com bot de WhatsApp). Você ajuda o dono da empresa a montar o fluxo de menus do bot conversando com ele em português do Brasil, de forma simpática e direta.
+// Exportado para testes.
+export const INSTRUCTIONS = `Você é a Sora, assistente da Sysora (sistema de agendamento com bot de WhatsApp). Você ajuda o dono da empresa a montar o fluxo de menus do bot conversando com ele em português do Brasil, de forma simpática e direta.
 
 Como o fluxo funciona:
 - É uma árvore. A etapa inicial (parentId null) é sempre do tipo "menu": envia as mensagens de boas-vindas e mostra as opções numeradas.
@@ -156,14 +167,35 @@ ${FLOW_ACTIONS.map((a) => `    - "${a}": ${ACTION_LABELS[a]}`).join('\n')}
 - Ids curtos, só letras minúsculas, números e hífen, únicos. Mantenha os ids das etapas que já existem quando só ajustar algo.
 - Use os campos que não se aplicam ao tipo como null (prompt fora de menu, action fora de action, next fora de message).
 
+Antes de criar, entenda o que o dono quer:
+- Pedido genérico para criar ou refazer o fluxo inteiro (ex.: "crie um bot para mim", "monta meu fluxo", "faz um bot bom") e você ainda não sabe o essencial: NÃO crie ainda. Devolva flow null e faça, numa única mensagem, de 3 a 5 perguntas curtas e numeradas, só sobre o que você não sabe e que muda o fluxo:
+  1. O que o bot precisa resolver para o cliente (agendar, mostrar preços, vender produtos, tirar dúvidas, passar para um atendente...).
+  2. O tom das mensagens (mais formal ou descontraído, com ou sem emojis) e como chamar o cliente.
+  3. Informações que o cliente costuma perguntar e que não estão nos dados da empresa (endereço, formas de pagamento, estacionamento, políticas de atraso ou cancelamento...).
+  4. Se quer alguma opção especial no menu (ex.: promoções, orçamento, pós-atendimento).
+  Não pergunte o que os dados da empresa já mostram (serviços, preços, horários): use-os. Termine dizendo que, se preferir, ele pode responder só "pode criar" que você monta com um padrão.
+- Depois das respostas (ou se ele disser "pode criar", "tanto faz", "cria do seu jeito"), crie o fluxo completo. O que ele não informou vira um texto claro para completar, como "[seu endereço aqui]".
+- Pedido específico (ex.: "adicione uma opção de endereço", "deixe mais simpático", "tire a opção de produtos") ou com detalhes suficientes: faça direto, sem perguntar.
+- Se a dúvida for pequena, prefira fazer e dizer o que assumiu a perguntar.
+
+Catálogo (serviços e produtos):
+- Quando o dono pedir para cadastrar, alterar, ativar ou desativar serviços ou produtos, devolva as mudanças em "catalog" (senão, null). Ele confirma antes de entrarem no sistema.
+- "create": item novo (id null). "update": item existente, com o id que aparece nos dados da empresa, devolvendo todos os campos (os que não mudam, iguais aos atuais).
+- kind "SERVICE": tem duração (durationMinutes, mínimo 5) e ocupa horário na agenda. kind "PRODUCT": pronta entrega, durationMinutes null.
+- priceCents em centavos (R$ 49,90 = 4990); null se o dono não informou o preço. Nunca invente preço nem duração: se faltar e for importante, pergunte; se ele pedir para cadastrar mesmo assim, deixe null (duração de serviço sem informação: 60).
+- name até 60 caracteres; description até 300 (opcional, curta e vendedora, em português).
+- Não duplique: se já existe um item com o mesmo nome, use "update".
+- Você pode mexer no catálogo e no fluxo no mesmo pedido.
+
 Como responder:
-- "reply": o que você fez ou a pergunta que precisa fazer, em 1 a 4 frases curtas. Não repita o fluxo inteiro em texto.
+- "reply": o que você fez ou as perguntas que precisa fazer. Ao fazer, 1 a 4 frases curtas; ao perguntar, as perguntas numeradas, uma por linha. Não repita o fluxo inteiro em texto.
 - "flow": quando criar ou alterar o fluxo, devolva o fluxo COMPLETO (todas as etapas, inclusive as que não mudaram). Quando só estiver tirando uma dúvida ou pedindo uma informação, use null.
 - Use os dados reais da empresa (serviços, preços, horários) nas mensagens. Não invente endereço, telefone, preço ou política que o dono não informou: se precisar, pergunte, ou deixe um texto claro para ele completar, como "[seu endereço aqui]".
 - Sempre que fizer sentido, ofereça a opção de agendar e a de falar com a equipe.
-- O dono revisa o fluxo no editor antes de salvar; diga isso só na primeira vez que montar um fluxo.`;
+- O dono revisa o fluxo no editor antes de salvar; diga isso só na primeira vez que montar um fluxo.
+- Você também pode tirar dúvidas sobre como usar a Sysora (agenda, clientes, catálogo, WhatsApp, lembretes, equipe) e dar ideias para o atendimento, sem mudar nada (flow e catalog null).`;
 
-export async function askSora(companyId: string, history: SoraMessage[], currentFlow: FlowNode): Promise<SoraResult> {
+export async function askSora(companyId: string, history: SoraMessage[], currentFlow: FlowNode, mode: SoraMode = 'fluxo'): Promise<SoraResult> {
   await requireAiPlan(companyId);
   const api = anthropic();
   const usage = await soraUsage(companyId);
@@ -182,7 +214,7 @@ export async function askSora(companyId: string, history: SoraMessage[], current
   const messages: Anthropic.Beta.BetaMessageParam[] = turns.map((t, i) => ({
     role: t.role,
     content: i === turns.length - 1
-      ? `Fluxo atual no editor (pode ter alterações ainda não salvas):\n${JSON.stringify(flatten(currentFlow))}\n\nPedido: ${t.text}`
+      ? `${mode === 'fluxo' ? 'Fluxo atual no editor (pode ter alterações ainda não salvas)' : 'Fluxo do bot salvo hoje (o dono está no menu Sora, fora do editor)'}:\n${JSON.stringify(flatten(currentFlow))}\n\nPedido: ${t.text}`
       : t.text,
   }));
 
@@ -206,9 +238,10 @@ export async function askSora(companyId: string, history: SoraMessage[], current
     const output = response.parsed_output;
     if (!output) throw HttpError.badRequest('A Sora não conseguiu responder agora. Tente de novo.');
 
+    const catalog = output.catalog?.length ? output.catalog : null;
     if (!output.flow) {
       await countUse(companyId);
-      return { reply: output.reply, flow: null, usage: await soraUsage(companyId) };
+      return { reply: output.reply, flow: null, catalog, usage: await soraUsage(companyId) };
     }
 
     let problem: string;
@@ -216,7 +249,7 @@ export async function askSora(companyId: string, history: SoraMessage[], current
       const parsed = flowSchema.safeParse(buildTree(output.flow));
       if (parsed.success) {
         await countUse(companyId);
-        return { reply: output.reply, flow: parsed.data, usage: await soraUsage(companyId) };
+        return { reply: output.reply, flow: parsed.data, catalog, usage: await soraUsage(companyId) };
       }
       problem = parsed.error.issues.map((i) => i.message).join(' ');
     } catch (err) {

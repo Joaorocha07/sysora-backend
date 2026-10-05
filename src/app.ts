@@ -17,6 +17,7 @@ import { dashboardRouter } from './modules/dashboard/dashboard.routes';
 import { emailCodesRouter } from './modules/emailCodes/emailCodes.routes';
 import { servicesRouter } from './modules/services/services.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
+import { soraRouter } from './modules/sora/sora.routes';
 import { usersRouter } from './modules/users/users.routes';
 import { subscriptionsRouter } from './modules/subscriptions/subscriptions.routes';
 import { privacyRouter } from './modules/privacy/privacy.routes';
@@ -69,6 +70,7 @@ app.use('/api/privacy', privacyRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/email-codes', emailCodesRouter);
+app.use('/api/sora', soraRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

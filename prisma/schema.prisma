@@ -75,6 +75,13 @@ model Account {
   trialEndsAt      DateTime?
   paidUntil        DateTime?
   mpSubscriptionId String?
+  // Cortesia (teste, parceiro): plano liberado sem cobrança. Não entra como venda no painel master.
+  complimentary    Boolean            @default(false)
+  // Uso de IA no mês (AAAA-MM), somado entre as empresas da conta (lib/aiQuota.ts).
+  soraMonth        String?
+  soraCount        Int                @default(0)
+  botAiMonth       String?
+  botAiCount       Int                @default(0)
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
@@ -148,6 +155,7 @@ model Company {
   whatsappCloud    WhatsAppCloudAccount?
   whatsappUsage    WhatsAppUsage[]
   emailInboxes     EmailInbox[]
+  soraConversations SoraConversation[]
   account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
   surveys          OnboardingSurvey[]
@@ -187,6 +195,7 @@ model User {
   appointments  Appointment[]       @relation("AppointmentStaff")
   survey        OnboardingSurvey?
   privacyRequests PrivacyRequest[]
+  soraConversations SoraConversation[]
 
   @@map("users")
 }
@@ -611,4 +620,39 @@ model ClientEmailAccess {
   @@id([clientId, inboxId])
   @@index([inboxId])
   @@map("client_email_access")
+}
+
+// Conversas com a Sora (menu Sora e painel do Fluxo do bot), salvas para o
+// histórico. source: "chat" (menu Sora) ou "fluxo" (editor do fluxo).
+model SoraConversation {
+  id        String   @id @default(uuid())
+  companyId String
+  userId    String?
+  title     String
+  source    String   @default("chat")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company  Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user     User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  messages SoraMessage[]
+
+  @@index([companyId, updatedAt])
+  @@map("sora_conversations")
+}
+
+// payload (respostas da Sora): fluxo proposto e/ou mudanças no catálogo, e
+// quando o catálogo foi aplicado (catalogAppliedAt).
+model SoraMessage {
+  id             String   @id @default(uuid())
+  conversationId String
+  role           String
+  text           String
+  payload        Json?
+  createdAt      DateTime @default(now())
+
+  conversation SoraConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("sora_messages")
 }

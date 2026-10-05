@@ -1,6 +1,7 @@
 import { AppointmentStatus, CompanySettings, MessageSender, Service, ServiceKind, Source } from '@prisma/client';
 import { env } from '../../config/env';
 import { hasAi, isAccountActive } from '../../lib/plans';
+import { botAiConfigured } from '../../lib/llm';
 import { prisma } from '../../lib/prisma';
 import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
@@ -821,7 +822,7 @@ async function advance(ctx: BotContext, step: BotStep, data: SessionData, text: 
 
 // Chama a IA (se ligada) com a pergunta e as opções que o cliente acabou de ver.
 async function aiUnderstand(ctx: BotContext, question: string, options: string[], text: string, services?: Service[]): Promise<Understanding | null> {
-  if (!ctx.ai || !env.ANTHROPIC_API_KEY || !ctx.settings.botAiEnabled) return null;
+  if (!ctx.ai || !botAiConfigured() || !ctx.settings.botAiEnabled) return null;
   return understand({
     companyId: ctx.companyId,
     companyName: ctx.companyName,
@@ -860,7 +861,7 @@ async function tryAiMenu(ctx: BotContext, menu: FlowNode, data: SessionData, tex
   const root = flowOf(ctx);
   const vars = { empresa: ctx.companyName };
   if (!ctx.ai) return false;
-  const services = env.ANTHROPIC_API_KEY && ctx.settings.botAiEnabled ? await activeServices(ctx.companyId) : [];
+  const services = botAiConfigured() && ctx.settings.botAiEnabled ? await activeServices(ctx.companyId) : [];
   const u = await aiUnderstand(ctx, menuText(ctx, menu), (menu.options ?? []).map((o) => fillTemplate(o.label, vars)), text, services);
   if (!u) return false;
   let parent = menu;

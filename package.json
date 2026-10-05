@@ -17,7 +17,8 @@
     "db:local": "node scripts/local-db.mjs",
     "prisma:status": "node scripts/db-guard.js migrate status",
     "db:backup": "node scripts/db-backup.js",
-    "db:check": "node scripts/db-check.js"
+    "db:check": "node scripts/db-check.js",
+    "ai:bench": "ts-node --transpile-only scripts/bot-ai-bench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

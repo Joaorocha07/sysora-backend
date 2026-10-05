@@ -48,6 +48,7 @@ const updateAccountSchema = z.object({
   status: z.nativeEnum(SubscriptionStatus).optional(),
   trialEndsAt: isoDateTime,
   paidUntil: isoDateTime,
+  complimentary: z.boolean().optional(),
 });
 
 export const adminRouter = Router();
