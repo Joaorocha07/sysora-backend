@@ -27,7 +27,7 @@ export const receiptUrl = (token: string) => `${siteUrl()}/comprovante/${token}`
 
 export async function bookingLinkFor(companyId: string, clientId: string, now = new Date()): Promise<{ url: string; expiresAt: Date }> {
   const existing = await prisma.bookingLink.findFirst({
-    where: { companyId, clientId, expiresAt: { gt: new Date(now.getTime() + REUSE_MIN_MS) } },
+    where: { companyId, clientId, usedAt: null, expiresAt: { gt: new Date(now.getTime() + REUSE_MIN_MS) } },
     orderBy: { expiresAt: 'desc' },
   });
   const link = existing ?? await prisma.bookingLink.create({
@@ -43,6 +43,7 @@ async function resolve(token: string) {
     include: { client: true, company: { include: { account: true } } },
   });
   if (!link) throw HttpError.notFound('Link de agendamento não encontrado. Peça um novo pelo WhatsApp.');
+  if (link.usedAt) throw new HttpError(410, 'LINK_USED', 'Este link já foi usado para agendar. Para marcar outro horário, peça um novo link pelo WhatsApp.');
   if (link.expiresAt < new Date()) throw new HttpError(410, 'LINK_EXPIRED', 'Este link de agendamento expirou. Peça um novo pelo WhatsApp.');
   if (!link.company.active || !isAccountActive(link.company.account)) throw HttpError.forbidden('O agendamento on-line desta empresa está indisponível no momento.');
   return { ...link, settings: await getSettings(link.companyId) };
@@ -60,12 +61,37 @@ async function bookableServices(companyId: string, serviceIds?: string[]) {
 }
 const durationOf = (services: { durationMinutes: number }[]) => services.reduce((sum, s) => sum + s.durationMinutes, 0);
 
-// Dados da página: empresa, cliente e serviços.
+// Link já usado: o agendamento que saiu dele (mesmo depois de vencer o link).
+async function bookedFrom(token: string) {
+  const link = await prisma.bookingLink.findUnique({ where: { token }, select: { usedAt: true, appointmentId: true } });
+  if (!link?.usedAt) return null;
+  const appointment = link.appointmentId
+    ? await prisma.appointment.findUnique({ where: { id: link.appointmentId }, include: { items: true, company: true } })
+    : null;
+  if (!appointment) return { appointment: null, company: null };
+  return {
+    company: { name: appointment.company.name, address: appointment.company.address },
+    appointment: {
+      status: appointment.status,
+      date: appointment.date,
+      startTime: appointment.startTime,
+      endTime: appointment.endTime,
+      totalCents: appointment.totalCents,
+      services: appointment.items.map((i) => i.name),
+      receiptUrl: appointment.receiptToken ? receiptUrl(appointment.receiptToken) : null,
+    },
+  };
+}
+
+// Dados da página: empresa, cliente e serviços. Link já usado: só o agendamento feito (booked).
 export async function getBooking(token: string) {
+  const booked = await bookedFrom(token);
+  if (booked) return { booked };
   const link = await resolve(token);
   const { settings } = link;
   const services = await bookableServices(link.companyId);
   return {
+    booked: null,
     company: { name: link.company.name, phone: link.company.phone, address: link.company.address },
     client: { name: isPlaceholder(link.client.name) ? null : link.client.name, phone: link.client.phone },
     services: services.map((s) => ({ id: s.id, name: s.name, description: s.description, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
@@ -97,18 +123,30 @@ export async function book(token: string, input: { serviceIds: string[]; date: s
   });
   if (open >= MAX_OPEN_APPOINTMENTS) throw HttpError.conflict('Você já tem horários marcados. Para marcar outro, fale com a empresa pelo WhatsApp.');
 
-  // Cliente ainda sem nome (só o do WhatsApp): usa o que ele digitou na página.
-  const name = input.name?.trim();
-  if (name && isPlaceholder(link.client.name)) await prisma.client.update({ where: { id: link.clientId }, data: { name } });
+  // Uso único: reserva o link antes de criar (dois cliques ao mesmo tempo não marcam dois horários).
+  const claimed = await prisma.bookingLink.updateMany({ where: { token, usedAt: null }, data: { usedAt: new Date() } });
+  if (!claimed.count) throw new HttpError(410, 'LINK_USED', 'Este link já foi usado para agendar. Para marcar outro horário, peça um novo link pelo WhatsApp.');
 
-  const created = await appointmentsService.createAppointment(link.companyId, {
-    clientId: link.clientId,
-    serviceIds: services.map((s) => s.id),
-    date: input.date,
-    startTime: input.time,
-    notes: 'Agendado pelo link do WhatsApp.',
-    ignoreConflicts: true,
-  }, Source.BOT);
+  let created: Awaited<ReturnType<typeof appointmentsService.createAppointment>>;
+  try {
+    // Cliente ainda sem nome (só o do WhatsApp): usa o que ele digitou na página.
+    const name = input.name?.trim();
+    if (name && isPlaceholder(link.client.name)) await prisma.client.update({ where: { id: link.clientId }, data: { name } });
+
+    created = await appointmentsService.createAppointment(link.companyId, {
+      clientId: link.clientId,
+      serviceIds: services.map((s) => s.id),
+      date: input.date,
+      startTime: input.time,
+      notes: 'Agendado pelo link do WhatsApp.',
+      ignoreConflicts: true,
+    }, Source.BOT);
+  } catch (err) {
+    // Não agendou: o link volta a valer.
+    await prisma.bookingLink.update({ where: { token }, data: { usedAt: null } }).catch(() => {});
+    throw err;
+  }
+  await prisma.bookingLink.update({ where: { token }, data: { appointmentId: created.id } });
   // Comprovante: link público só com os dados deste agendamento.
   const appointment = await prisma.appointment.update({
     where: { id: created.id },

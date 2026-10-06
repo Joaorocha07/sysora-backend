@@ -737,6 +737,10 @@ model BookingLink {
   companyId String
   clientId  String
   expiresAt DateTime
+  // Link de uso único: ao agendar, guarda quando e qual agendamento saiu dele.
+  // Aberto de novo, a página mostra a confirmação em vez da agenda.
+  usedAt        DateTime?
+  appointmentId String?
   createdAt DateTime @default(now())
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)

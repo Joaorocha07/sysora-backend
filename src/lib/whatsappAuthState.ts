@@ -7,6 +7,7 @@ import { decryptSecret, encryptSecret } from './crypto';
 // whatsapp_auth, criptografada, então a sessão sobrevive a reinícios e deploys.
 
 const CREDS_KEY = 'creds';
+const WRITE_BATCH_SIZE = 50;
 
 async function readValue(companyId: string, key: string) {
   const row = await prisma.whatsAppAuth.findUnique({ where: { companyId_key: { companyId, key } } });
@@ -44,26 +45,45 @@ export async function useDatabaseAuthState(companyId: string): Promise<{ state: 
     state: {
       creds,
       keys: {
+        // Uma query só para todos os ids (antes era uma por id, o que esgotava o pool).
         get: async <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
           const data: { [id: string]: SignalDataTypeMap[T] } = {};
-          await Promise.all(ids.map(async (id) => {
-            let value = await readValue(companyId, `${type}-${id}`);
+          if (ids.length === 0) return data;
+          const prefix = `${type}-`;
+          const rows = await prisma.whatsAppAuth.findMany({
+            where: { companyId, key: { in: ids.map((id) => prefix + id) } },
+            select: { key: true, value: true },
+          });
+          for (const row of rows) {
+            let value = JSON.parse(decryptSecret(row.value), BufferJSON.reviver);
             if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value);
-            data[id] = value;
-          }));
+            data[row.key.slice(prefix.length)] = value;
+          }
           return data;
         },
+        // O Baileys manda centenas de chaves de uma vez (pre-keys no pareamento).
+        // Gravar tudo em paralelo esgota o pool de conexões; então as remoções
+        // vão num deleteMany só e os upserts em lotes sequenciais, cada lote
+        // numa transação (= uma conexão).
         set: async (data) => {
-          const tasks: Promise<unknown>[] = [];
+          const upserts: { key: string; value: string }[] = [];
+          const deletes: string[] = [];
           for (const category of Object.keys(data) as (keyof SignalDataTypeMap)[]) {
             for (const [id, value] of Object.entries(data[category] ?? {})) {
               const key = `${category}-${id}`;
-              tasks.push(value
-                ? writeValue(companyId, key, value)
-                : prisma.whatsAppAuth.deleteMany({ where: { companyId, key } }));
+              if (value) upserts.push({ key, value: encryptSecret(JSON.stringify(value, BufferJSON.replacer)) });
+              else deletes.push(key);
             }
           }
-          await Promise.all(tasks);
+          if (deletes.length) await prisma.whatsAppAuth.deleteMany({ where: { companyId, key: { in: deletes } } });
+          for (let i = 0; i < upserts.length; i += WRITE_BATCH_SIZE) {
+            await prisma.$transaction(upserts.slice(i, i + WRITE_BATCH_SIZE).map(({ key, value }) =>
+              prisma.whatsAppAuth.upsert({
+                where: { companyId_key: { companyId, key } },
+                update: { value },
+                create: { companyId, key, value },
+              })));
+          }
         },
       },
     },
