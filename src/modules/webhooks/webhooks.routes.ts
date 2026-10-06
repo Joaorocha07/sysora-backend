@@ -4,7 +4,7 @@ import { asyncHandler } from '../../lib/asyncHandler';
 import { prisma } from '../../lib/prisma';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
 import {
-  applyInvoice, applyPixPayment, getMpInvoice, getMpPayment, getMpSubscription,
+  applyInvoice, applyOneTimePayment, getMpInvoice, getMpPayment, getMpSubscription,
 } from '../subscriptions/subscriptions.service';
 import { handleWebhook, markWebhookReceived, verifyCompanySignature, verifySignature, webhookVerifyToken } from '../whatsapp/whatsapp.cloud';
 
@@ -62,8 +62,8 @@ webhooksRouter.post('/mercadopago', asyncHandler(async (req: Request, res: Respo
   }
 
   if (type === 'payment' && data?.id) {
-    // Pagamento avulso (Pix) aprovado; ativa a conta referenciada.
-    try { await applyPixPayment(await getMpPayment(String(data.id))); } catch { /* ignora */ }
+    // Pagamento avulso (Pix ou cartão no anual) aprovado; ativa a conta referenciada.
+    try { await applyOneTimePayment(await getMpPayment(String(data.id))); } catch { /* ignora */ }
   }
 
   // Sempre retorna 200 para o MP não reenviar a notificação.

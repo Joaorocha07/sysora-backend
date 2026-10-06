@@ -1,4 +1,4 @@
-import { Account, Plan, SubscriptionStatus } from '@prisma/client';
+import { Account, BillingCycle, Plan, SubscriptionStatus } from '@prisma/client';
 
 // Catálogo de planos da Sysora. Os preços são mensais, em centavos.
 // maxEmployees: pessoas além do administrador (o dono) em cada empresa. A
@@ -46,6 +46,12 @@ export const PLANS: Record<Plan, {
   },
 };
 
+// Plano anual: pagamento único de 12 meses com desconto sobre 12 mensalidades.
+// Manter igual a sysora-frontend/src/lib/plans.ts.
+export const YEARLY_DISCOUNT_PERCENT = 20;
+export const yearlyPriceCents = (plan: Plan) => Math.round((PLANS[plan].priceCents * 12 * (100 - YEARLY_DISCOUNT_PERCENT)) / 100);
+export const cyclePriceCents = (plan: Plan, cycle: BillingCycle) => (cycle === BillingCycle.YEARLY ? yearlyPriceCents(plan) : PLANS[plan].priceCents);
+
 // Teste grátis de 1 mês (30 dias, a mesma conta de um mês pago em addMonth).
 export const TRIAL_DAYS = 30;
 // Dias de tolerância depois do vencimento antes de bloquear o acesso.
@@ -76,6 +82,8 @@ export function subscriptionSummary(account: Account) {
     plan: account.plan,
     planName: plan.name,
     priceCents: plan.priceCents,
+    billingCycle: account.billingCycle,
+    yearlyPriceCents: yearlyPriceCents(account.plan),
     status: account.status,
     trialEndsAt: account.trialEndsAt,
     paidUntil: account.paidUntil,
@@ -88,7 +96,9 @@ export function subscriptionSummary(account: Account) {
   };
 }
 
-export const planCatalog = () => (Object.keys(PLANS) as Plan[]).map((id) => ({ id, ...PLANS[id] }));
+export const planCatalog = () => (Object.keys(PLANS) as Plan[]).map((id) => ({ id, ...PLANS[id], yearlyPriceCents: yearlyPriceCents(id) }));
 
 export const trialEnd = () => new Date(Date.now() + TRIAL_DAYS * DAY_MS);
 export const addMonth = (from: Date) => new Date(from.getTime() + 30 * DAY_MS);
+export const addYear = (from: Date) => new Date(from.getTime() + 365 * DAY_MS);
+export const addCycle = (from: Date, cycle: BillingCycle) => (cycle === BillingCycle.YEARLY ? addYear(from) : addMonth(from));

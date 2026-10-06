@@ -1,8 +1,8 @@
 import { randomUUID } from 'crypto';
 import { Invoice, MercadoPagoConfig, Payment, PreApproval, PreApprovalPlan } from 'mercadopago';
-import { Plan } from '@prisma/client';
+import { BillingCycle, Plan } from '@prisma/client';
 import { env } from '../../config/env';
-import { addMonth, PLANS } from '../../lib/plans';
+import { addCycle, addMonth, cyclePriceCents, PLANS, yearlyPriceCents } from '../../lib/plans';
 import { prisma } from '../../lib/prisma';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
 import { HttpError } from '../../lib/httpError';
@@ -130,29 +130,53 @@ export async function applyInvoice(invoice: MpInvoice) {
   invalidateSubscriptionCache(companies.map((c) => c.id));
 }
 
-// ---------- Pix (pagamento avulso de 1 mês) ----------
+// ---------- Pagamentos avulsos: Pix (1 mês ou 1 ano) e cartão no plano anual ----------
 
-// external_reference no formato "pix:<accountId>:<plan>" liga o pagamento à conta.
-export function pixReference(accountId: string, plan: Plan) {
-  return `pix:${accountId}:${plan}`;
+// external_reference "pay:<accountId>:<plan>:<ciclo>" liga o pagamento à conta.
+// Pix gerado antes do plano anual usa "pix:<accountId>:<plan>" (sempre mensal).
+export function paymentReference(accountId: string, plan: Plan, cycle: BillingCycle) {
+  return `pay:${accountId}:${plan}:${cycle}`;
 }
 
-export function parsePixReference(ref: string | null | undefined): { accountId: string; plan: Plan } | null {
-  const [prefix, accountId, plan] = (ref ?? '').split(':');
-  if (prefix !== 'pix' || !accountId || !(plan in Plan)) return null;
-  return { accountId, plan: plan as Plan };
+export function parsePaymentReference(ref: string | null | undefined): { accountId: string; plan: Plan; cycle: BillingCycle } | null {
+  const [prefix, accountId, plan, cycle = BillingCycle.MONTHLY] = (ref ?? '').split(':');
+  if ((prefix !== 'pay' && prefix !== 'pix') || !accountId || !(plan in Plan) || !(cycle in BillingCycle)) return null;
+  return { accountId, plan: plan as Plan, cycle: cycle as BillingCycle };
 }
 
-export async function createPixPayment(accountId: string, plan: Plan, payerEmail: string) {
+function paymentDescription(plan: Plan, cycle: BillingCycle) {
+  return `Sysora ${PLANS[plan].name} - ${cycle === BillingCycle.YEARLY ? '12 meses' : '1 mês'}`;
+}
+
+export async function createPixPayment(accountId: string, plan: Plan, cycle: BillingCycle, payerEmail: string) {
   const client = getClient();
-  const planData = PLANS[plan];
   return new Payment(client).create({
     body: {
-      transaction_amount: planData.priceCents / 100,
-      description: `Sysora ${planData.name} - 1 mês`,
+      transaction_amount: cyclePriceCents(plan, cycle) / 100,
+      description: paymentDescription(plan, cycle),
       payment_method_id: 'pix',
       payer: { email: payerEmail },
-      external_reference: pixReference(accountId, plan),
+      external_reference: paymentReference(accountId, plan, cycle),
+    },
+    requestOptions: { idempotencyKey: randomUUID() },
+  });
+}
+
+// Plano anual no cartão: cobrança única, parcelada pelo Mercado Pago (juros do cliente).
+export async function createYearlyCardPayment(accountId: string, plan: Plan, input: {
+  cardTokenId: string; payerEmail: string; installments: number; paymentMethodId: string; issuerId?: string;
+}) {
+  const client = getClient();
+  return new Payment(client).create({
+    body: {
+      transaction_amount: yearlyPriceCents(plan) / 100,
+      description: paymentDescription(plan, BillingCycle.YEARLY),
+      token: input.cardTokenId,
+      installments: input.installments,
+      payment_method_id: input.paymentMethodId,
+      ...(input.issuerId ? { issuer_id: Number(input.issuerId) } : {}),
+      payer: { email: input.payerEmail },
+      external_reference: paymentReference(accountId, plan, BillingCycle.YEARLY),
     },
     requestOptions: { idempotencyKey: randomUUID() },
   });
@@ -163,25 +187,34 @@ export async function getMpPayment(paymentId: string) {
   return new Payment(client).get({ id: paymentId });
 }
 
-// Ativa a conta a partir de um pagamento Pix aprovado. Idempotente: paidUntil é
-// calculado a partir da data de aprovação, então reprocessar não estende o prazo.
-export async function applyPixPayment(payment: Awaited<ReturnType<typeof getMpPayment>>) {
-  const ref = parsePixReference(payment.external_reference);
-  if (!ref || payment.status !== 'approved') return false;
+// Ativa a conta a partir de um pagamento avulso aprovado. Soma o ciclo ao que
+// ainda restava (pagar antes de vencer não perde dias). Idempotente: o id do
+// pagamento fica em lastPaymentId e o mesmo pagamento não é somado duas vezes
+// (webhook e consulta da tela podem chegar juntos).
+export async function applyOneTimePayment(payment: Awaited<ReturnType<typeof getMpPayment>>) {
+  const ref = parsePaymentReference(payment.external_reference);
+  if (!ref || payment.status !== 'approved' || !payment.id) return false;
+  const paymentId = String(payment.id);
 
   const account = await prisma.account.findUnique({ where: { id: ref.accountId } });
   if (!account) return false;
+  if (account.lastPaymentId === paymentId) return true;
 
-  // Pix substitui a assinatura recorrente no cartão, para não cobrar em dobro.
+  const approvedAt = payment.date_approved ? new Date(payment.date_approved) : new Date();
+  const base = account.paidUntil && account.paidUntil > approvedAt ? account.paidUntil : approvedAt;
+  const { count } = await prisma.account.updateMany({
+    where: { id: account.id, OR: [{ lastPaymentId: null }, { lastPaymentId: { not: paymentId } }] },
+    data: {
+      plan: ref.plan, billingCycle: ref.cycle, status: 'ACTIVE', paidUntil: addCycle(base, ref.cycle),
+      trialEndsAt: null, mpSubscriptionId: null, lastPaymentId: paymentId,
+    },
+  });
+  if (!count) return true;
+
+  // O pagamento avulso substitui a assinatura recorrente no cartão, para não cobrar em dobro.
   if (account.mpSubscriptionId) {
     try { await cancelMpSubscription(account.mpSubscriptionId); } catch { /* ignora */ }
   }
-
-  const approvedAt = payment.date_approved ? new Date(payment.date_approved) : new Date();
-  await prisma.account.update({
-    where: { id: account.id },
-    data: { plan: ref.plan, status: 'ACTIVE', paidUntil: addMonth(approvedAt), mpSubscriptionId: null },
-  });
 
   const companies = await prisma.company.findMany({ where: { accountId: account.id }, select: { id: true } });
   invalidateSubscriptionCache(companies.map((c) => c.id));

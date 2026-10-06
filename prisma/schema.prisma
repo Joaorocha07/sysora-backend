@@ -50,6 +50,11 @@ enum ServiceKind {
   PRODUCT
 }
 
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+}
+
 // Planos pagos (limites e preços em src/lib/plans.ts).
 enum Plan {
   INICIAL
@@ -75,6 +80,10 @@ model Account {
   trialEndsAt      DateTime?
   paidUntil        DateTime?
   mpSubscriptionId String?
+  // Mensal = assinatura recorrente no cartão ou Pix de 1 mês; anual = pagamento único de 12 meses.
+  billingCycle     BillingCycle       @default(MONTHLY)
+  // Último pagamento avulso (Pix ou cartão anual) já somado em paidUntil: evita somar duas vezes.
+  lastPaymentId    String?
   // Cortesia (teste, parceiro): plano liberado sem cobrança. Não entra como venda no painel master.
   complimentary    Boolean            @default(false)
   // Uso de IA no mês (AAAA-MM), somado entre as empresas da conta (lib/aiQuota.ts).

@@ -4,7 +4,7 @@ import { HttpError } from '../../lib/httpError';
 import { hashPassword } from '../../lib/password';
 import { uniqueCompanySlug } from '../../lib/slug';
 import { uniqueInviteCode } from '../../lib/inviteCode';
-import { PLANS, addMonth, isAccountActive, subscriptionSummary, trialEnd } from '../../lib/plans';
+import { PLANS, addCycle, addMonth, isAccountActive, subscriptionSummary, trialEnd, yearlyPriceCents } from '../../lib/plans';
 import { invalidateSubscriptionCache } from '../../middlewares/subscription.middleware';
 import { env } from '../../config/env';
 import { getPlatformSettings } from '../../lib/platformSettings';
@@ -30,7 +30,7 @@ const monthStart = () => {
 export async function stats() {
   const [companies, accounts, users, clients, appointmentsThisMonth, connected] = await Promise.all([
     prisma.company.count({ where: customerCompany }),
-    prisma.account.findMany({ where: { companies: { some: customerCompany } }, select: { plan: true, status: true, trialEndsAt: true, paidUntil: true, complimentary: true } }),
+    prisma.account.findMany({ where: { companies: { some: customerCompany } }, select: { plan: true, billingCycle: true, status: true, trialEndsAt: true, paidUntil: true, complimentary: true } }),
     prisma.user.count({ where: { isSuperAdmin: false } }),
     prisma.client.count({ where: { company: customerCompany } }),
     prisma.appointment.count({ where: { company: customerCompany, date: { gte: monthStart() }, status: { not: AppointmentStatus.CANCELED } } }),
@@ -44,8 +44,8 @@ export async function stats() {
     payingAccounts: paying.length,
     complimentaryAccounts: accounts.filter((a) => a.complimentary && isAccountActive(a)).length,
     trialAccounts: accounts.filter((a) => a.status === SubscriptionStatus.TRIAL && isAccountActive(a)).length,
-    // Receita mensal recorrente das contas pagas.
-    mrrCents: paying.reduce((sum, a) => sum + PLANS[a.plan].priceCents, 0),
+    // Receita mensal recorrente das contas pagas (anual entra como 1/12 do valor).
+    mrrCents: paying.reduce((sum, a) => sum + (a.billingCycle === 'YEARLY' ? Math.round(yearlyPriceCents(a.plan) / 12) : PLANS[a.plan].priceCents), 0),
     users,
     clients,
     appointmentsThisMonth,
@@ -200,8 +200,8 @@ export async function updateAccount(accountId: string, input: { plan?: Plan; sta
   return subscriptionSummary(updated);
 }
 
-// Pagamento recebido: conta ativa por mais 30 dias (a partir do vencimento
-// atual, se ainda não venceu).
+// Pagamento recebido: conta ativa por mais um ciclo (30 dias ou, no anual, 365)
+// a partir do vencimento atual, se ainda não venceu.
 export async function registerPayment(accountId: string) {
   const account = await prisma.account.findUnique({ where: { id: accountId } });
   if (!account) throw HttpError.notFound('Conta não encontrada.');
@@ -209,7 +209,7 @@ export async function registerPayment(accountId: string) {
   const base = account.status === SubscriptionStatus.ACTIVE && account.paidUntil && account.paidUntil > now ? account.paidUntil : now;
   const updated = await prisma.account.update({
     where: { id: accountId },
-    data: { status: SubscriptionStatus.ACTIVE, paidUntil: addMonth(base), trialEndsAt: null },
+    data: { status: SubscriptionStatus.ACTIVE, paidUntil: addCycle(base, account.billingCycle), trialEndsAt: null },
   });
   invalidateSubscriptionCache(await accountCompanies(accountId));
   return subscriptionSummary(updated);

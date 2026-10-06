@@ -1,5 +1,5 @@
 import { Request, Response, Router } from 'express';
-import { Role } from '@prisma/client';
+import { BillingCycle, Role } from '@prisma/client';
 import { asyncHandler } from '../../lib/asyncHandler';
 import { HttpError } from '../../lib/httpError';
 import { addMonth, subscriptionSummary } from '../../lib/plans';
@@ -9,8 +9,8 @@ import { invalidateSubscriptionCache } from '../../middlewares/subscription.midd
 import { validate } from '../../middlewares/validate.middleware';
 import { checkoutSchema, pixSchema } from './subscriptions.schema';
 import {
-  applyPixPayment, cancelMpSubscription, createMpSubscription, createPixPayment, getMpPayment, getMpPlanId, getMpSubscription,
-  parsePixReference, waitFirstCharge,
+  applyOneTimePayment, cancelMpSubscription, createMpSubscription, createPixPayment, createYearlyCardPayment, getMpPayment, getMpPlanId,
+  getMpSubscription, parsePaymentReference, waitFirstCharge,
 } from './subscriptions.service';
 
 async function accountOfCompany(companyId: string) {
@@ -28,8 +28,21 @@ subscriptionsRouter.use(authenticate, requireCompany, requireRole(Role.ADMIN));
 
 // POST /api/subscriptions/checkout — assina ou troca de plano.
 subscriptionsRouter.post('/checkout', validate(checkoutSchema), asyncHandler(async (req: Request, res: Response) => {
-  const { cardTokenId, payerEmail, plan } = req.body;
+  const { cardTokenId, payerEmail, plan, cycle, installments, paymentMethodId, issuerId } = req.body;
   const account = await accountOfCompany(companyOf(req));
+
+  // Anual: cobrança única parcelável. Aprovada, ativa na hora; em análise, o
+  // webhook (payment) ativa quando o Mercado Pago confirmar.
+  if (cycle === BillingCycle.YEARLY) {
+    if (!paymentMethodId) throw HttpError.badRequest('Não foi possível identificar a bandeira do cartão. Confira o número.');
+    const payment = await createYearlyCardPayment(account.id, plan, { cardTokenId, payerEmail, installments, paymentMethodId, issuerId });
+    if (payment.status === 'rejected' || payment.status === 'cancelled') {
+      throw HttpError.badRequest('Cartão recusado pelo banco. Verifique os dados ou use outro cartão.');
+    }
+    await applyOneTimePayment(payment);
+    const updated = await prisma.account.findUniqueOrThrow({ where: { id: account.id } });
+    return res.json({ subscription: subscriptionSummary(updated), pending: payment.status !== 'approved' });
+  }
 
   // Cria a assinatura nova antes de mexer na antiga: se o cartão for recusado,
   // o cliente continua com o que já tinha.
@@ -54,6 +67,7 @@ subscriptionsRouter.post('/checkout', validate(checkoutSchema), asyncHandler(asy
     where: { id: account.id },
     data: {
       plan,
+      billingCycle: BillingCycle.MONTHLY,
       mpSubscriptionId: mpSub.id,
       ...(charge === 'approved' ? { status: 'ACTIVE' as const, paidUntil } : {}),
     },
@@ -92,12 +106,12 @@ subscriptionsRouter.get('/status', asyncHandler(async (req: Request, res: Respon
   });
 }));
 
-// POST /api/subscriptions/pix — gera um QR Code Pix para pagar 1 mês do plano.
+// POST /api/subscriptions/pix — gera um QR Code Pix para pagar 1 mês ou 1 ano do plano.
 subscriptionsRouter.post('/pix', validate(pixSchema), asyncHandler(async (req: Request, res: Response) => {
-  const { payerEmail, plan } = req.body;
+  const { payerEmail, plan, cycle } = req.body;
   const account = await accountOfCompany(companyOf(req));
 
-  const payment = await createPixPayment(account.id, plan, payerEmail);
+  const payment = await createPixPayment(account.id, plan, cycle, payerEmail);
   const data = payment.point_of_interaction?.transaction_data;
   if (!payment.id || !data?.qr_code || !data.qr_code_base64) {
     throw HttpError.badRequest('Não foi possível gerar o Pix. Tente novamente.');
@@ -111,10 +125,10 @@ subscriptionsRouter.get('/pix/:paymentId/status', asyncHandler(async (req: Reque
   const account = await accountOfCompany(companyOf(req));
   const payment = await getMpPayment(req.params.paymentId);
 
-  if (parsePixReference(payment.external_reference)?.accountId !== account.id) {
+  if (parsePaymentReference(payment.external_reference)?.accountId !== account.id) {
     throw HttpError.notFound('Pagamento não encontrado.');
   }
 
-  const paid = await applyPixPayment(payment);
+  const paid = await applyOneTimePayment(payment);
   return res.json({ paid });
 }));
