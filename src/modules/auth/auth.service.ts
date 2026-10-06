@@ -203,9 +203,17 @@ export async function listMyMemberships(userId: string) {
   }));
 }
 
+const REFRESH_REUSE_GRACE_MS = 60_000;
+
 export async function refreshSession(rawRefreshToken: string): Promise<SessionResult> {
   const stored = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(rawRefreshToken) } });
-  if (!stored || stored.revokedAt || stored.expiresAt < new Date()) {
+  // Duas abas abertas mandam o mesmo cookie quase juntas: a primeira troca o
+  // token e a segunda chegaria com ele já revogado, derrubando a sessão. Um
+  // token trocado há pouco (não por logout) ainda vale por alguns segundos.
+  const justRotated = Boolean(
+    stored?.revokedAt && stored.replacedByTokenHash && Date.now() - stored.revokedAt.getTime() < REFRESH_REUSE_GRACE_MS,
+  );
+  if (!stored || (stored.revokedAt && !justRotated) || stored.expiresAt < new Date()) {
     throw HttpError.unauthorized('Sessão expirada. Faça login novamente.');
   }
 
@@ -220,10 +228,12 @@ export async function refreshSession(rawRefreshToken: string): Promise<SessionRe
     if (!fallback) throw err;
     session = { ...(await issueSession(stored.userId, fallback.id)), notice: `${err.message} Você foi levado para ${fallback.name}.` };
   }
-  await prisma.refreshToken.update({
-    where: { id: stored.id },
-    data: { revokedAt: new Date(), replacedByTokenHash: hashToken(session.refreshToken) },
-  });
+  if (!justRotated) {
+    await prisma.refreshToken.update({
+      where: { id: stored.id },
+      data: { revokedAt: new Date(), replacedByTokenHash: hashToken(session.refreshToken) },
+    });
+  }
   return session;
 }
 
