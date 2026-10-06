@@ -8,8 +8,8 @@ import { validate } from '../../middlewares/validate.middleware';
 import { flowSchema } from '../whatsapp/whatsapp.flow';
 import * as service from './sora.service';
 
-// Menu Sora: conversas com a IA (histórico), catálogo e fluxo.
-// O plano (IA só no Avançado pago) é conferido em askSora.
+// Menu Sora: conversas com a IA (histórico), catálogo, clientes e fluxo.
+// O plano (Sora nos planos pagos, com limite) é conferido em askSora.
 
 const messageSchema = z.object({
   conversationId: z.string().uuid().nullish(),
@@ -44,7 +44,7 @@ soraRouter.post('/messages', validate(messageSchema), asyncHandler(async (req: R
   return res.json(await service.sendMessage(companyOf(req), req.auth!.userId, req.body));
 }));
 
-// Confirma as mudanças de catálogo propostas numa resposta da Sora.
+// Confirma as mudanças no catálogo e nos clientes propostas numa resposta da Sora.
 soraRouter.post('/messages/:id/apply-catalog', asyncHandler(async (req: Request, res: Response) => {
-  return res.json(await service.applyCatalog(companyOf(req), req.params.id));
+  return res.json(await service.applyChanges(companyOf(req), req.params.id));
 }));

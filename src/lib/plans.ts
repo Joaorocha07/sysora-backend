@@ -9,8 +9,12 @@ export const PLANS: Record<Plan, {
   priceCents: number;
   maxCompanies: number;
   maxEmployees: number;
-  // Recursos de IA (Sora, bot que entende texto e áudio, descrições com IA). Ver hasAi().
+  // IA no atendimento (bot que entende texto e áudio, teste com IA no simulador)
+  // e descrições de serviço com IA. Ver hasAi().
   ai: boolean;
+  // Sora (assistente que monta o fluxo e o catálogo): gasto máximo com a API
+  // por conta por mês, em dólares (lib/aiQuota.ts -> soraSpend). Ver hasSora().
+  soraBudgetUsd: number;
   features: string[];
 }> = {
   INICIAL: {
@@ -19,12 +23,14 @@ export const PLANS: Record<Plan, {
     maxCompanies: 1,
     maxEmployees: 2,
     ai: false,
+    soraBudgetUsd: 3,
     features: [
       '1 empresa com 1 número de WhatsApp',
       'Administrador + até 2 funcionários',
       'Chatbot que cadastra e agenda',
       'Agenda, clientes e serviços ilimitados',
       'Lembretes e confirmação de presença',
+      'Sora: IA que monta o fluxo do bot (uso básico no mês)',
     ],
   },
   AVANCADO: {
@@ -33,12 +39,13 @@ export const PLANS: Record<Plan, {
     maxCompanies: 2,
     maxEmployees: 5,
     ai: true,
+    soraBudgetUsd: 8,
     features: [
       'Até 2 empresas, cada uma com o seu WhatsApp',
       'Administrador + até 5 funcionários por empresa',
       'Tudo do plano Inicial',
       'IA no WhatsApp: entende mensagens escritas e áudios',
-      'Sora: IA que monta o fluxo do bot',
+      'Sora com mais que o dobro de uso no mês',
       'Descrições de serviços com IA',
       'Troca rápida entre as empresas',
       'Suporte prioritário',
@@ -68,8 +75,14 @@ export function isAccountActive(account: Billing, now = new Date()): boolean {
   return account.paidUntil.getTime() + GRACE_DAYS * DAY_MS > now.getTime();
 }
 
-// IA só no plano Avançado já pago: o teste grátis é sempre o do plano Inicial
-// (sem IA), mesmo para quem escolheu o Avançado no cadastro.
+// Sora em qualquer plano já pago (o limite muda: soraBudgetUsd). O teste
+// grátis não tem IA.
+export function hasSora(account: Pick<Account, 'status' | 'trialEndsAt' | 'paidUntil'>, now = new Date()): boolean {
+  return account.status !== SubscriptionStatus.TRIAL && isAccountActive(account, now);
+}
+
+// IA no atendimento só no plano Avançado já pago: o teste grátis é sempre o do
+// plano Inicial (sem IA), mesmo para quem escolheu o Avançado no cadastro.
 export function hasAi(account: Pick<Account, 'plan' | 'status' | 'trialEndsAt' | 'paidUntil'>, now = new Date()): boolean {
   return PLANS[account.plan].ai && account.status !== SubscriptionStatus.TRIAL && isAccountActive(account, now);
 }
@@ -91,6 +104,8 @@ export function subscriptionSummary(account: Account) {
     maxCompanies: plan.maxCompanies,
     maxEmployees: plan.maxEmployees,
     ai: hasAi(account),
+    sora: hasSora(account),
+    soraBudgetUsd: plan.soraBudgetUsd,
     // Cortesia: plano liberado sem cobrança (não é venda).
     complimentary: account.complimentary,
   };

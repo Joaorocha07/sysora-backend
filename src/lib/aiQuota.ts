@@ -1,4 +1,5 @@
 import { env } from '../config/env';
+import { PLANS } from './plans';
 import { prismaBase } from './prisma';
 
 // Limite mensal de IA por CONTA (não por empresa): no Avançado, as 2 empresas
@@ -16,7 +17,8 @@ const FIELDS = {
   botAi: { month: 'botAiMonth', count: 'botAiCount' },
 } as const;
 
-export const quotaLimit = (kind: QuotaKind) => (kind === 'sora' ? env.SORA_MONTHLY_LIMIT : env.BOT_AI_MONTHLY_LIMIT);
+// O limite da Sora é em dólares (soraSpend); este contador de pedidos fica só como registro.
+export const quotaLimit = (_kind: QuotaKind) => env.BOT_AI_MONTHLY_LIMIT;
 
 async function accountOf(companyId: string) {
   const company = await prismaBase.company.findUniqueOrThrow({ where: { id: companyId }, select: { account: true } });
@@ -38,4 +40,18 @@ export async function countQuota(companyId: string, kind: QuotaKind): Promise<vo
     where: { id: account.id },
     data: account[f.month] === month ? { [f.count]: { increment: 1 } } : { [f.month]: month, [f.count]: 1 },
   });
+}
+
+// Sora: gasto do mês (UTC) com a API, somado entre as empresas da conta, e o
+// teto do plano (PLANS[plano].soraBudgetUsd). Valores em milionésimos de dólar,
+// como em AiUsage.costMicros.
+export async function soraSpend(companyId: string): Promise<{ used: number; limit: number }> {
+  const account = await accountOf(companyId);
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const spent = await prismaBase.aiUsage.aggregate({
+    _sum: { costMicros: true },
+    where: { feature: 'sora', createdAt: { gte: monthStart }, company: { accountId: account.id } },
+  });
+  return { used: spent._sum.costMicros ?? 0, limit: PLANS[account.plan].soraBudgetUsd * 1_000_000 };
 }

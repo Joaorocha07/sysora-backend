@@ -69,8 +69,6 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   // Sonnet: metade do preço do Opus e suficiente para montar fluxos.
   SORA_MODEL: z.string().default('claude-sonnet-5-5'),
-  // Pedidos à Sora por conta por mês (cada mensagem no chat conta 1; as empresas da conta dividem).
-  SORA_MONTHLY_LIMIT: z.coerce.number().int().positive().default(60),
   // IA do atendimento: entende o que o cliente escreveu quando não é um número
   // nem uma palavra-chave (whatsapp.ai.ts). Modelo barato e rápido; mesma chave da Sora.
   BOT_AI_MODEL: z.string().default('claude-haiku-4-5'),

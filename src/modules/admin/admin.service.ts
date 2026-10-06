@@ -252,7 +252,8 @@ export async function aiUsageSummary() {
   return {
     configured: Boolean(env.ANTHROPIC_API_KEY),
     model: env.SORA_MODEL,
-    monthlyLimitPerCompany: env.SORA_MONTHLY_LIMIT,
+    // Limite da Sora por conta por mês, em dólares, por plano.
+    soraBudgetUsd: { INICIAL: PLANS.INICIAL.soraBudgetUsd, AVANCADO: PLANS.AVANCADO.soraBudgetUsd },
     creditUsd,
     spentUsd,
     remainingUsd: creditUsd - spentUsd,
