@@ -38,8 +38,9 @@ conversationsRouter.get('/', asyncHandler(async (req: Request, res: Response) =>
     orderBy: { lastMessageAt: 'desc' },
     take: 200,
     select: {
-      id: true, name: true, phone: true, whatsappId: true, lastMessageAt: true, unreadCount: true,
+      id: true, name: true, phone: true, whatsappId: true, lastMessageAt: true, unreadCount: true, stageId: true, archivedAt: true,
       messages: { orderBy: { createdAt: 'desc' }, take: 1, select: { text: true, sender: true, createdAt: true } },
+      tags: { select: { tagId: true } },
     },
   });
   const handoffs = await prisma.whatsAppSession.findMany({
@@ -48,16 +49,33 @@ conversationsRouter.get('/', asyncHandler(async (req: Request, res: Response) =>
   });
   const human = new Set(handoffs.map((h) => h.phone));
   return res.json({
-    conversations: clients.map(({ messages, ...c }) => ({ ...c, lastMessage: messages[0] ?? null, withStaff: Boolean(c.whatsappId && human.has(c.whatsappId)) })),
+    conversations: clients.map(({ messages, tags, ...c }) => ({
+      ...c,
+      tagIds: tags.map((t) => t.tagId),
+      lastMessage: messages[0] ?? null,
+      withStaff: Boolean(c.whatsappId && human.has(c.whatsappId)),
+    })),
   });
+}));
+
+// Arquiva (some da caixa principal) ou desarquiva. Volta sozinha quando o cliente escreve.
+conversationsRouter.post('/:clientId/archive', validate(z.object({ archived: z.boolean() })), asyncHandler(async (req: Request, res: Response) => {
+  const client = await findClient(companyOf(req), req.params.clientId);
+  const updated = await prisma.client.update({
+    where: { id: client.id },
+    data: { archivedAt: req.body.archived ? new Date() : null, ...(req.body.archived ? { unreadCount: 0 } : {}) },
+    select: { archivedAt: true },
+  });
+  return res.json(updated);
 }));
 
 conversationsRouter.get('/:clientId', asyncHandler(async (req: Request, res: Response) => {
   const companyId = companyOf(req);
   const client = await findClient(companyId, req.params.clientId);
-  const [messages, bot] = await Promise.all([
+  const [messages, bot, tags] = await Promise.all([
     prisma.message.findMany({ where: { clientId: client.id }, orderBy: { createdAt: 'desc' }, take: 300 }),
     client.whatsappId ? humanState(companyId, client.whatsappId) : NOT_PAUSED,
+    prisma.clientTag.findMany({ where: { clientId: client.id }, select: { tagId: true } }),
   ]);
   if (client.unreadCount) await prisma.client.update({ where: { id: client.id }, data: { unreadCount: 0 } });
   // API oficial: a equipe só pode escrever até 24 h depois da última mensagem do cliente.
@@ -69,7 +87,7 @@ conversationsRouter.get('/:clientId', asyncHandler(async (req: Request, res: Res
     canReply: Boolean(client.whatsappId) && (!official || (Boolean(windowEndsAt && windowEndsAt.getTime() > Date.now()) && !client.whatsappId!.includes('@'))),
     hiddenNumber: official && Boolean(client.whatsappId?.includes('@')),
   };
-  return res.json({ client: { ...client, unreadCount: 0 }, messages: messages.reverse(), bot, channel });
+  return res.json({ client: { ...client, unreadCount: 0, tagIds: tags.map((t) => t.tagId) }, messages: messages.reverse(), bot, channel });
 }));
 
 conversationsRouter.post('/:clientId/reply', validate(replySchema), asyncHandler(async (req: Request, res: Response) => {

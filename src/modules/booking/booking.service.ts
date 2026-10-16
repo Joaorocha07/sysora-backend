@@ -156,6 +156,101 @@ export async function book(token: string, input: { serviceIds: string[]; date: s
   return { appointment, settings: link.settings, company: { name: link.company.name, address: link.company.address } };
 }
 
+// ============ Link aberto da empresa (/reservar/[token]) ============
+// O dono gera e manda para quem quiser; a pessoa informa nome e WhatsApp e
+// marca. Mesmo telefone = mesmo cliente (não duplica o cadastro).
+
+export const openBookingUrl = (token: string) => `${siteUrl()}/reservar/${token}`;
+export const newOpenToken = () => crypto.randomBytes(9).toString('base64url');
+
+async function resolveOpen(token: string) {
+  const settings = await prisma.companySettings.findUnique({
+    where: { publicBookingToken: token },
+    include: { company: { include: { account: true } } },
+  });
+  if (!settings?.publicBookingEnabled) throw HttpError.notFound('Link de agendamento não encontrado. Peça um novo para a empresa.');
+  if (!settings.company.active || !isAccountActive(settings.company.account)) throw HttpError.forbidden('O agendamento on-line desta empresa está indisponível no momento.');
+  return { companyId: settings.companyId, company: settings.company, settings: await getSettings(settings.companyId) };
+}
+
+export async function getOpenBooking(token: string) {
+  const link = await resolveOpen(token);
+  const services = await bookableServices(link.companyId);
+  return {
+    booked: null,
+    company: { name: link.company.name, phone: link.company.phone, address: link.company.address },
+    client: null,
+    services: services.map((s) => ({ id: s.id, name: s.name, description: s.description, durationMinutes: s.durationMinutes, priceCents: s.priceCents })),
+    hours: { openingTime: link.settings.openingTime, closingTime: link.settings.closingTime, workDays: link.settings.workDays },
+  };
+}
+
+export async function getOpenDays(token: string, serviceIds: string[]) {
+  const link = await resolveOpen(token);
+  const services = await bookableServices(link.companyId, serviceIds);
+  return nextFreeDays(link.companyId, link.settings, DAYS_SHOWN, durationOf(services));
+}
+
+export async function getOpenTimes(token: string, serviceIds: string[], date: string) {
+  const link = await resolveOpen(token);
+  const services = await bookableServices(link.companyId, serviceIds);
+  return freeTimes(link.companyId, link.settings, date, durationOf(services));
+}
+
+const onlyDigits = (v: string) => v.replace(/\D/g, '');
+// Telefone digitado -> wa_id (55 + DDD + número). Aceita com ou sem o 55.
+export function whatsappIdOf(phone: string): string | null {
+  const digits = onlyDigits(phone);
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith('55')) return digits;
+  return null;
+}
+
+export async function bookOpen(token: string, input: { serviceIds: string[]; date: string; time: string; name: string; phone: string }) {
+  const link = await resolveOpen(token);
+  const waId = whatsappIdOf(input.phone);
+  if (!waId) throw HttpError.badRequest('Informe o WhatsApp com DDD, ex.: (34) 99999-9999.');
+  const services = await bookableServices(link.companyId, input.serviceIds);
+  if (!(await isTimeFree(link.companyId, link.settings, input.date, input.time, durationOf(services)))) {
+    throw HttpError.conflict('Esse horário não está mais disponível. Escolha outro.');
+  }
+
+  // Mesmo número: o cadastro que já existe (pelo WhatsApp ou pelo telefone, com ou sem o 55).
+  const local = waId.slice(2);
+  const existing = await prisma.client.findFirst({ where: { companyId: link.companyId, whatsappId: waId }, orderBy: { createdAt: 'asc' }, select: { id: true } })
+    ?? (await prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM clients
+      WHERE "companyId" = ${link.companyId} AND regexp_replace(phone, '[^0-9]', '', 'g') IN (${local}, ${waId})
+      ORDER BY "createdAt" ASC LIMIT 1`)[0];
+  const name = input.name.trim();
+  const client = existing
+    ? await prisma.client.findUniqueOrThrow({ where: { id: existing.id } })
+    : await prisma.client.create({ data: { companyId: link.companyId, name, phone: input.phone.trim(), whatsappId: waId, source: Source.BOT } });
+  if (existing && (isPlaceholder(client.name) || !client.whatsappId)) {
+    await prisma.client.update({ where: { id: client.id }, data: { ...(isPlaceholder(client.name) ? { name } : {}), ...(!client.whatsappId ? { whatsappId: waId } : {}) } });
+  }
+
+  const open = await prisma.appointment.count({
+    where: { companyId: link.companyId, clientId: client.id, status: { in: ACTIVE_STATUSES }, date: { gte: toIsoDate(new Date()) } },
+  });
+  if (open >= MAX_OPEN_APPOINTMENTS) throw HttpError.conflict('Você já tem horários marcados. Para marcar outro, fale com a empresa pelo WhatsApp.');
+
+  const created = await appointmentsService.createAppointment(link.companyId, {
+    clientId: client.id,
+    serviceIds: services.map((s) => s.id),
+    date: input.date,
+    startTime: input.time,
+    notes: 'Agendado pelo link aberto de agendamento.',
+    ignoreConflicts: true,
+  }, Source.BOT);
+  const appointment = await prisma.appointment.update({
+    where: { id: created.id },
+    data: { receiptToken: crypto.randomBytes(9).toString('base64url') },
+    include: appointmentsService.appointmentInclude,
+  });
+  return { appointment, settings: link.settings, company: { name: link.company.name, address: link.company.address }, isNewClient: !existing };
+}
+
 // Página do comprovante: empresa, cliente, serviços, data, valor e situação.
 export async function getReceipt(token: string) {
   const appointment = await prisma.appointment.findUnique({

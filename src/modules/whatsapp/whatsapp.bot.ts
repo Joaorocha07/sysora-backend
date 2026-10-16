@@ -3,6 +3,7 @@ import { env } from '../../config/env';
 import { hasAi, isAccountActive } from '../../lib/plans';
 import { botAiConfigured } from '../../lib/llm';
 import { prisma } from '../../lib/prisma';
+import { notifyClientMessage, notifyHandoff } from '../../lib/push';
 import { HttpError } from '../../lib/httpError';
 import { brDate, dateTime, durationLabel, toIsoDate, weekdayOf } from '../../lib/time';
 import { transcribeAudio, transcriptionEnabled } from '../../lib/transcription';
@@ -374,13 +375,16 @@ export async function findClientByWhatsApp(companyId: string, waId: string) {
 
 export async function logMessage(companyId: string, clientId: string | null, text: string, sender: MessageSender, staffName?: string) {
   if (!clientId) return;
+  const now = new Date();
+  // Mensagem do cliente: conta como não lida, desarquiva a conversa e recomeça o follow-up.
+  const inbound = sender === MessageSender.CLIENT
+    ? { unreadCount: { increment: 1 }, lastInboundAt: now, followUpStep: 0, archivedAt: null }
+    : {};
   await prisma.$transaction([
-    prisma.message.create({ data: { companyId, clientId, text, sender, staffName } }),
-    prisma.client.update({
-      where: { id: clientId },
-      data: { lastMessageAt: new Date(), ...(sender === MessageSender.CLIENT ? { unreadCount: { increment: 1 } } : {}) },
-    }),
+    prisma.message.create({ data: { companyId, clientId, text, sender, staffName, createdAt: now } }),
+    prisma.client.update({ where: { id: clientId }, data: { lastMessageAt: now, ...inbound } }),
   ]);
+  if (sender === MessageSender.CLIENT) notifyClientMessage(companyId, clientId);
 }
 
 async function say(ctx: BotContext, text: string) {
@@ -429,6 +433,7 @@ const finishConversation = (ctx: BotContext) => setSession(ctx, 'MENU', { idle: 
 async function handOff(ctx: BotContext, prefix?: string) {
   await setSession(ctx, 'HUMAN', { requestedAt: new Date().toISOString() });
   await say(ctx, blocks(prefix, ctx.settings.handoffMessage));
+  if (ctx.clientId) notifyHandoff(ctx.companyId, ctx.clientId);
 }
 
 // A equipe mandou mensagem: o bot fica em silêncio com esse cliente e o prazo

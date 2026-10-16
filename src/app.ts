@@ -11,6 +11,7 @@ import { accountRouter } from './modules/account/account.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { appointmentsRouter } from './modules/appointments/appointments.routes';
 import { bookingRouter } from './modules/booking/booking.routes';
+import { bookingLinksRouter } from './modules/booking/bookingLinks.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { clientsRouter } from './modules/clients/clients.routes';
 import { clientSubscriptionsRouter } from './modules/clientSubscriptions/clientSubscriptions.routes';
@@ -26,6 +27,13 @@ import { privacyRouter } from './modules/privacy/privacy.routes';
 import { surveyRouter } from './modules/survey/survey.routes';
 import { webhooksRouter } from './modules/webhooks/webhooks.routes';
 import { whatsappRouter } from './modules/whatsapp/whatsapp.routes';
+import { tagsRouter } from './modules/tags/tags.routes';
+import { quickRepliesRouter } from './modules/quickReplies/quickReplies.routes';
+import { pipelineRouter } from './modules/pipeline/pipeline.routes';
+import { scheduledMessagesRouter } from './modules/scheduledMessages/scheduledMessages.routes';
+import { followUpRouter } from './modules/followUp/followUp.routes';
+import { pushRouter } from './modules/push/push.routes';
+import { reactivationRouter } from './modules/reactivation/reactivation.routes';
 
 export const app = express();
 
@@ -66,6 +74,7 @@ app.use('/api/services', servicesRouter);
 app.use('/api/appointments', appointmentsRouter);
 // Página pública do link de agendamento (sem login).
 app.use('/api/booking', bookingRouter);
+app.use('/api/booking-links', bookingLinksRouter);
 app.use('/api/conversations', conversationsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/settings', settingsRouter);
@@ -76,6 +85,13 @@ app.use('/api/webhooks', webhooksRouter);
 app.use('/api/whatsapp', whatsappRouter);
 app.use('/api/email-codes', emailCodesRouter);
 app.use('/api/sora', soraRouter);
+app.use('/api/tags', tagsRouter);
+app.use('/api/quick-replies', quickRepliesRouter);
+app.use('/api/pipeline', pipelineRouter);
+app.use('/api/scheduled-messages', scheduledMessagesRouter);
+app.use('/api/follow-up', followUpRouter);
+app.use('/api/push', pushRouter);
+app.use('/api/reactivation', reactivationRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

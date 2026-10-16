@@ -172,6 +172,12 @@ model Company {
   clientSubscriptions ClientSubscription[]
   bookingLinks     BookingLink[]
   botFlows         BotFlow[]
+  tags             Tag[]
+  quickReplies     QuickReply[]
+  pipelineStages   PipelineStage[]
+  clientNotes      ClientNote[]
+  scheduledMessages ScheduledMessage[]
+  followUpSteps    FollowUpStep[]
   account          Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
   aiUsage          AiUsage[]
   surveys          OnboardingSurvey[]
@@ -212,6 +218,7 @@ model User {
   survey        OnboardingSurvey?
   privacyRequests PrivacyRequest[]
   soraConversations SoraConversation[]
+  pushSubscriptions PushSubscription[]
 
   @@map("users")
 }
@@ -285,18 +292,33 @@ model Client {
   lastMessageAt DateTime?
   // Mensagens do cliente ainda não vistas pela equipe (caixa de conversas).
   unreadCount   Int       @default(0)
+  // Última mensagem enviada pelo cliente (follow-up e insights do atendimento).
+  lastInboundAt DateTime?
+  // Quantas mensagens de follow-up já foram desde a última mensagem do cliente.
+  followUpStep  Int       @default(0)
+  // Etapa do funil de vendas (nula = primeira etapa).
+  stageId       String?
+  // Conversa arquivada na caixa de conversas; volta sozinha quando o cliente escreve.
+  archivedAt    DateTime?
+  // Última mensagem de reativação ("faz tempo que você não vem") que o bot mandou.
+  reactivatedAt DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
   company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  stage        PipelineStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
   appointments Appointment[]
   messages     Message[]
   emailAccess  ClientEmailAccess[]
   subscriptions ClientSubscription[]
   bookingLinks  BookingLink[]
+  tags          ClientTag[]
+  noteEntries   ClientNote[]
+  scheduledMessages ScheduledMessage[]
 
   @@index([companyId])
   @@index([companyId, whatsappId])
+  @@index([companyId, stageId])
   @@map("clients")
 }
 
@@ -460,10 +482,162 @@ model CompanySettings {
   botAiCount          Int     @default(0)
   // Áudios do cliente viram texto (lib/transcription.ts) e seguem o mesmo atendimento.
   transcribeAudio     Boolean @default(true)
+  // Follow-up automático: mensagens (FollowUpStep) para quem parou de responder.
+  followUpEnabled     Boolean @default(false)
+  // Reativação: o bot convida para agendar quem não manda mensagem há
+  // reactivationDays dias (sendReactivations em whatsapp.jobs.ts). Aceita
+  // {nome}, {empresa} e {link} (link pessoal de agendamento).
+  reactivationEnabled Boolean @default(false)
+  reactivationDays    Int     @default(30)
+  reactivationMessage String  @default("Oi, {nome}! Faz um tempinho que a gente não se fala. Que tal marcar um horário? É só escolher o melhor dia por aqui: {link}")
+  // Link aberto de agendamento da empresa (/reservar/[token]): qualquer pessoa
+  // informa nome e WhatsApp e marca. Trocar o token invalida o link antigo.
+  publicBookingEnabled Boolean @default(false)
+  publicBookingToken   String? @unique
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   @@map("company_settings")
+}
+
+// Etiqueta de cliente (cor = uma das cores neutras do sistema, ver lib/tags.ts no frontend).
+model Tag {
+  id        String   @id @default(uuid())
+  companyId String
+  name      String
+  color     String   @default("graphite")
+  createdAt DateTime @default(now())
+
+  company Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  clients ClientTag[]
+
+  @@unique([companyId, name])
+  @@map("tags")
+}
+
+model ClientTag {
+  clientId  String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, tagId])
+  @@index([tagId])
+  @@map("client_tags")
+}
+
+// Texto pronto para a equipe inserir no chat ("/atalho" ou pelo botão).
+model QuickReply {
+  id        String   @id @default(uuid())
+  companyId String
+  title     String
+  shortcut  String?
+  text      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("quick_replies")
+}
+
+// Etapas do funil de vendas (Kanban). Criadas com as etapas padrão na primeira vez.
+model PipelineStage {
+  id        String   @id @default(uuid())
+  companyId String
+  name      String
+  position  Int      @default(0)
+  // Etapa de venda fechada (o insight de conversão conta quem chegou nela).
+  won       Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  company Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  clients Client[]
+
+  @@index([companyId])
+  @@map("pipeline_stages")
+}
+
+// Anotação com data na ficha do cliente (histórico; o campo Client.notes segue como observação fixa).
+model ClientNote {
+  id         String   @id @default(uuid())
+  companyId  String
+  clientId   String
+  authorId   String?
+  authorName String
+  text       String
+  createdAt  DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+  @@map("client_notes")
+}
+
+enum ScheduledMessageStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELED
+}
+
+// Mensagem que a equipe deixou programada para um cliente (whatsapp.jobs.ts envia).
+model ScheduledMessage {
+  id            String                 @id @default(uuid())
+  companyId     String
+  clientId      String
+  text          String
+  sendAt        DateTime
+  status        ScheduledMessageStatus @default(PENDING)
+  sentAt        DateTime?
+  error         String?
+  createdById   String?
+  createdByName String
+  createdAt     DateTime               @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([status, sendAt])
+  @@index([companyId, sendAt])
+  @@map("scheduled_messages")
+}
+
+// Mensagens do follow-up automático, na ordem (position). delayMinutes conta
+// a partir da última mensagem do cliente.
+model FollowUpStep {
+  id           String   @id @default(uuid())
+  companyId    String
+  position     Int
+  delayMinutes Int
+  text         String
+  createdAt    DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("follow_up_steps")
+}
+
+// Notificação no navegador/celular (Web Push) de mensagens novas.
+// scope: 'all' = toda mensagem de cliente; 'handoff' = só quem está com a equipe.
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  scope     String   @default("all")
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }
 
 // Estado da conversa do bot com um número (menu, etapas do agendamento ou

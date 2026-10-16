@@ -104,6 +104,13 @@ const schema = z.object({
   SMTP_PASS: z.string().optional(),
   MAIL_FROM: z.string().optional(),
   APP_URL: z.string().optional(),
+
+  // Notificações no navegador/celular (Web Push) de mensagens novas. Gerar o
+  // par com: npx web-push generate-vapid-keys. Sem as chaves, o botão de
+  // ativar notificações aparece desativado.
+  VAPID_PUBLIC_KEY: optionalText(),
+  VAPID_PRIVATE_KEY: optionalText(),
+  VAPID_SUBJECT: z.string().default('mailto:contato@sysora.com.br'),
 });
 
 const parsed = schema.safeParse(process.env);

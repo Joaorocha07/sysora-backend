@@ -30,6 +30,8 @@ export const PLANS: Record<Plan, {
       'Chatbot que cadastra e agenda',
       'Agenda, clientes e serviços ilimitados',
       'Lembretes e confirmação de presença',
+      'Funil de vendas, etiquetas e respostas rápidas',
+      'Follow-up automático e mensagens agendadas',
       'Sora: IA que monta o fluxo do bot (uso básico no mês)',
     ],
   },

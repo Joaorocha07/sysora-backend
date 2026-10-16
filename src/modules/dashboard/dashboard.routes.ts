@@ -9,6 +9,7 @@ import { requireActiveSubscription } from '../../middlewares/subscription.middle
 import { appointmentInclude } from '../appointments/appointments.service';
 import { ACTIVE_STATUSES } from '../appointments/availability';
 import * as connection from '../whatsapp/whatsapp.connection';
+import { attendanceInsights } from './dashboard.insights';
 
 // Números do painel inicial da empresa.
 export const dashboardRouter = Router();
@@ -87,4 +88,10 @@ dashboardRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     upcoming,
     week,
   });
+}));
+
+// Insights do atendimento (aba Atendimento do painel): últimos 7, 30 ou 90 dias.
+dashboardRouter.get('/insights', asyncHandler(async (req: Request, res: Response) => {
+  const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 7;
+  return res.json(await attendanceInsights(companyOf(req), days));
 }));
