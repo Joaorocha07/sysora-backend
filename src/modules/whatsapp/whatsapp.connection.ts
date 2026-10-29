@@ -237,7 +237,9 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
     version: await latestVersion(),
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     logger,
-    browser: Browsers.ubuntu('Sysora'),
+    // Conexão por código só é aceita pelo WhatsApp com um navegador real
+    // (com 'Sysora' o celular diz que o código é inválido). No QR vale qualquer nome.
+    browser: conn.pairingPhone ? Browsers.ubuntu('Chrome') : Browsers.ubuntu('Sysora'),
     // Sem isso o celular para de receber notificações enquanto o servidor está conectado.
     markOnlineOnConnect: false,
     syncFullHistory: false,
@@ -253,19 +255,25 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
 
   sock.ev.on('creds.update', () => { saveCreds().catch((err) => logger.error({ err }, 'Falha ao salvar a sessão do WhatsApp')); });
 
-  // Conexão por número: pede o código de pareamento assim que o socket abre,
-  // antes de qualquer QR. Só vale enquanto a sessão não está registrada.
-  if (conn.pairingPhone && !state.creds.registered) {
+  // Conexão por número: pede o código de pareamento quando o WhatsApp manda o
+  // primeiro QR (sinal de que o handshake terminou). Pedir antes disso, com
+  // espera fixa, falha ou gera código inválido quando a rede é mais lenta.
+  // Só uma vez por socket e só enquanto a sessão não está registrada.
+  let pairingRequested = false;
+  async function requestPairingCode() {
+    if (pairingRequested || !conn.pairingPhone || state.creds.registered) return;
+    pairingRequested = true;
     try {
-      // Pequena espera para o socket inicializar antes de pedir o código.
-      await sleep(1_500);
-      if (conn.sock === sock && !conn.closing) {
-        const code = await sock.requestPairingCode(conn.pairingPhone);
-        conn.pairingCode = code;
-        conn.error = null;
-      }
+      const code = await sock.requestPairingCode(conn.pairingPhone);
+      if (conn.sock !== sock || conn.closing) return;
+      conn.pairingCode = code;
+      conn.error = null;
     } catch (err) {
       logger.error({ err, companyId }, 'Falha ao gerar o código de conexão do WhatsApp');
+      if (conn.sock !== sock) return;
+      // Solta o socket antes de fechar: o evento de 'close' dele é ignorado.
+      conn.sock = null;
+      sock.end(undefined);
       conn.status = 'disconnected';
       conn.pairingCode = null;
       conn.error = 'Não foi possível gerar o código. Confira o número (com DDI e DDD) e tente de novo.';
@@ -275,6 +283,8 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
   sock.ev.on('connection.update', (update) => {
     void (async () => {
       if (conn.sock !== sock) return;
+
+      if (update.qr && conn.pairingPhone) await requestPairingCode();
 
       // Em conexão por número não mostramos QR Code: o cliente usa o código.
       if (update.qr && !conn.pairingPhone) {
