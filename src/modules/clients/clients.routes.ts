@@ -62,6 +62,28 @@ function importDate(value: string): string | null {
 
 const onlyDigits = (value: string) => value.replace(/\D/g, '');
 
+// Ids dos clientes da empresa cujo nome ou e-mail contém o termo, ignorando
+// acento e maiúsculas. translate() troca cada letra acentuada pela sem acento
+// (nos dois lados) — não precisa da extensão unaccent. Limite alto porque é só
+// um pré-filtro de ids; a consulta principal aplica take/ordenação.
+const ACCENTED = 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ';
+const PLAIN = 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN';
+async function searchClientIdsByText(companyId: string, term: string): Promise<string[]> {
+  // Escapa os curingas do LIKE para que % e _ sejam buscados como texto.
+  const escaped = term.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "Client"
+    WHERE "companyId" = ${companyId}
+      AND (
+        translate(lower("name"), ${ACCENTED}, ${PLAIN})
+          LIKE '%' || translate(lower(${escaped}), ${ACCENTED}, ${PLAIN}) || '%' ESCAPE '\'
+        OR translate(lower(coalesce("email", '')), ${ACCENTED}, ${PLAIN})
+          LIKE '%' || translate(lower(${escaped}), ${ACCENTED}, ${PLAIN}) || '%' ESCAPE '\'
+      )
+    LIMIT 2000`;
+  return rows.map((r) => r.id);
+}
+
 // Telefone digitado no sistema -> wa_id (55 + DDD + número), para o bot
 // reconhecer o cliente quando ele mandar mensagem.
 function whatsappIdFromPhone(phone: string): string | null {
@@ -90,6 +112,10 @@ clientsRouter.get('/', validate(listQuerySchema, 'query'), asyncHandler(async (r
   const companyId = companyOf(req);
   // Cliente sem etapa está na primeira.
   const firstStage = stageId ? (await stagesOf(companyId))[0]?.id : undefined;
+  // Busca por nome/e-mail ignorando acento: "joao" acha "João". O Postgres não
+  // tem unaccent habilitado aqui, então dobramos os acentos com translate()
+  // (dos dois lados) numa consulta crua que devolve só os ids que batem.
+  const nameMatchIds = search ? await searchClientIdsByText(companyId, search) : null;
   const where: Prisma.ClientWhereInput = {
     companyId,
     ...(tagId ? { tags: { some: { tagId } } } : {}),
@@ -97,8 +123,7 @@ clientsRouter.get('/', validate(listQuerySchema, 'query'), asyncHandler(async (r
     ...(search
       ? {
           OR: [
-            { name: { contains: search, mode: 'insensitive' } },
-            { email: { contains: search, mode: 'insensitive' } },
+            ...(nameMatchIds && nameMatchIds.length ? [{ id: { in: nameMatchIds } }] : []),
             ...(digits ? [{ phone: { contains: digits } }, { whatsappId: { contains: digits } }] : []),
           ],
         }

@@ -57,7 +57,7 @@ const requestBase = (req: Request) => `${req.protocol}://${req.get('host')}`;
 async function status(companyId: string, base = '') {
   const official = await cloud.cloudStatus(companyId, base);
   if (official) {
-    return { status: 'connected' as const, qr: null, phone: official.phone, error: official.lastError, provider: 'cloud' as const, cloud: official };
+    return { status: 'connected' as const, qr: null, pairingCode: null, phone: official.phone, error: official.lastError, provider: 'cloud' as const, cloud: official };
   }
   const state = connection.getConnectionState(companyId);
   if (state.status === 'connected') await connection.syncConnectedFlag(companyId);
@@ -84,6 +84,18 @@ whatsappRouter.post('/connect', requireRole(Role.ADMIN), asyncHandler(async (req
   const companyId = companyOf(req);
   if (await cloud.getCloudAccount(companyId)) throw HttpError.badRequest(OFFICIAL_CONNECTED);
   await connection.connect(companyId);
+  return res.json(await status(companyId, requestBase(req)));
+}));
+
+// Conecta pelo número: o WhatsApp mostra um campo "Conectar com número de
+// telefone" e a pessoa digita o código de 8 dígitos. Alternativa ao QR Code.
+const connectCodeSchema = z.object({
+  phone: z.string().trim().min(10, 'Informe o número com DDI e DDD.').max(20),
+});
+whatsappRouter.post('/connect-code', requireRole(Role.ADMIN), validate(connectCodeSchema), asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  if (await cloud.getCloudAccount(companyId)) throw HttpError.badRequest(OFFICIAL_CONNECTED);
+  await connection.connectWithCode(companyId, req.body.phone);
   return res.json(await status(companyId, requestBase(req)));
 }));
 

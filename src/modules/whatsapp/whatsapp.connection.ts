@@ -39,12 +39,17 @@ export type WhatsAppConnectionState = {
   status: ConnectionStatus;
   // QR Code em data URL (image/png), presente só enquanto status = 'qr'.
   qr: string | null;
+  // Código de 8 dígitos para conectar pelo número (alternativa ao QR Code).
+  // Presente enquanto o cliente ainda não digitou no celular.
+  pairingCode: string | null;
   phone: string | null;
   error: string | null;
 };
 
 type Connection = WhatsAppConnectionState & {
   sock: WASocket | null;
+  // Número (com DDI) para conexão por código; null = conexão por QR Code.
+  pairingPhone: string | null;
   retries: number;
   closing: boolean;
   timer?: NodeJS.Timeout;
@@ -78,8 +83,8 @@ function latestVersion() {
 }
 
 function publicState(conn: Connection | undefined): WhatsAppConnectionState {
-  if (!conn) return { status: 'disconnected', qr: null, phone: null, error: null };
-  return { status: conn.status, qr: conn.qr, phone: conn.phone, error: conn.error };
+  if (!conn) return { status: 'disconnected', qr: null, pairingCode: null, phone: null, error: null };
+  return { status: conn.status, qr: conn.qr, pairingCode: conn.pairingCode, phone: conn.phone, error: conn.error };
 }
 
 function statusCode(error: unknown): number | undefined {
@@ -119,7 +124,25 @@ export async function connect(companyId: string): Promise<WhatsAppConnectionStat
   const existing = connections.get(companyId);
   if (existing && existing.status !== 'disconnected') return publicState(existing);
 
-  const conn: Connection = { status: 'connecting', qr: null, phone: null, error: null, sock: null, retries: 0, closing: false };
+  const conn: Connection = { status: 'connecting', qr: null, pairingCode: null, phone: null, error: null, sock: null, pairingPhone: null, retries: 0, closing: false };
+  connections.set(companyId, conn);
+  await openSocket(companyId, conn);
+  return publicState(conn);
+}
+
+// Conecta pelo número (código de 8 dígitos digitado no celular), no lugar do
+// QR Code. `phone` entra com DDI (ex.: 5531999999999). O código é gerado em
+// openSocket e aparece no status enquanto o cliente não digita.
+export async function connectWithCode(companyId: string, phone: string): Promise<WhatsAppConnectionState> {
+  if (!env.WHATSAPP_ENABLED) throw HttpError.badRequest('O WhatsApp está desativado neste servidor (WHATSAPP_ENABLED=false).');
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 12 || digits.length > 15) throw HttpError.badRequest('Informe o número com DDI e DDD (ex.: 5531999999999).');
+  const existing = connections.get(companyId);
+  if (existing && existing.status !== 'disconnected') return publicState(existing);
+  // Começa uma sessão nova: o código só vale para um aparelho ainda não registrado.
+  await clearStoredSession(companyId);
+
+  const conn: Connection = { status: 'connecting', qr: null, pairingCode: null, phone: null, error: null, sock: null, pairingPhone: digits, retries: 0, closing: false };
   connections.set(companyId, conn);
   await openSocket(companyId, conn);
   return publicState(conn);
@@ -230,11 +253,31 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
 
   sock.ev.on('creds.update', () => { saveCreds().catch((err) => logger.error({ err }, 'Falha ao salvar a sessão do WhatsApp')); });
 
+  // Conexão por número: pede o código de pareamento assim que o socket abre,
+  // antes de qualquer QR. Só vale enquanto a sessão não está registrada.
+  if (conn.pairingPhone && !state.creds.registered) {
+    try {
+      // Pequena espera para o socket inicializar antes de pedir o código.
+      await sleep(1_500);
+      if (conn.sock === sock && !conn.closing) {
+        const code = await sock.requestPairingCode(conn.pairingPhone);
+        conn.pairingCode = code;
+        conn.error = null;
+      }
+    } catch (err) {
+      logger.error({ err, companyId }, 'Falha ao gerar o código de conexão do WhatsApp');
+      conn.status = 'disconnected';
+      conn.pairingCode = null;
+      conn.error = 'Não foi possível gerar o código. Confira o número (com DDI e DDD) e tente de novo.';
+    }
+  }
+
   sock.ev.on('connection.update', (update) => {
     void (async () => {
       if (conn.sock !== sock) return;
 
-      if (update.qr) {
+      // Em conexão por número não mostramos QR Code: o cliente usa o código.
+      if (update.qr && !conn.pairingPhone) {
         conn.status = 'qr';
         conn.error = null;
         conn.qr = await QRCode.toDataURL(update.qr, { margin: 1, width: 280 });
@@ -243,6 +286,8 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
       if (update.connection === 'open') {
         conn.status = 'connected';
         conn.qr = null;
+        conn.pairingCode = null;
+        conn.pairingPhone = null;
         conn.error = null;
         conn.retries = 0;
         conn.phone = jidDecode(sock.user?.id)?.user ?? null;
@@ -259,20 +304,25 @@ async function openSocket(companyId: string, conn: Connection): Promise<void> {
           // Desconectado pelo celular (Aparelhos conectados > Desconectar).
           conn.status = 'disconnected';
           conn.phone = null;
-          conn.error = 'O WhatsApp foi desconectado pelo celular. Leia o QR Code novamente para reconectar.';
+          conn.pairingCode = null;
+          conn.error = 'O WhatsApp foi desconectado pelo celular. Conecte novamente para reconectar.';
           await clearStoredSession(companyId);
           await setConnectedFlag(companyId, false, null);
           return;
         }
         if (code === DisconnectReason.connectionReplaced) {
           conn.status = 'disconnected';
+          conn.pairingCode = null;
           conn.error = 'Esta sessão foi aberta em outro servidor. Mantenha só uma instância do sistema conectada e clique em Reconectar.';
           return;
         }
         if (!state.creds.registered && code !== DisconnectReason.restartRequired) {
-          // Ninguém leu o QR Code a tempo.
+          // Ninguém leu o QR Code / digitou o código a tempo.
           conn.status = 'disconnected';
-          conn.error = 'O QR Code expirou. Clique em Conectar para gerar outro.';
+          conn.pairingCode = null;
+          conn.error = conn.pairingPhone
+            ? 'O código expirou. Clique em Conectar por número para gerar outro.'
+            : 'O QR Code expirou. Clique em Conectar para gerar outro.';
           await clearStoredSession(companyId);
           return;
         }

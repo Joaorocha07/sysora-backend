@@ -334,6 +334,10 @@ model Service {
   durationMinutes Int         @default(60)
   // Preço em centavos, para não perder precisão.
   priceCents      Int      @default(0)
+  // Custo mensal da conta em centavos (o quanto a empresa paga pela conta de
+  // acesso, ex.: R$ 100 do ChatGPT). Só entra no lucro quando a conta tem ao
+  // menos uma pessoa ativa — conta sem ninguém logado não é cobrada.
+  costCents       Int      @default(0)
   active          Boolean  @default(true)
   // Ordem na lista oferecida pelo bot.
   position        Int      @default(0)

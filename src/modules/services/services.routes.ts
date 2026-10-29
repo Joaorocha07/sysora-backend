@@ -8,6 +8,7 @@ import { authenticate, companyOf, requireCompany, requireRole } from '../../midd
 import { requireActiveSubscription } from '../../middlewares/subscription.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { improveDescription } from './services.ai';
+import { activeClientsByService } from '../clientSubscriptions/clientSubscriptions.service';
 
 // Catálogo da empresa: serviços com horário (o bot oferece os ativos para
 // agendar, na ordem de `position`) e produtos de pronta entrega (sem duração:
@@ -21,6 +22,8 @@ const serviceSchema = z.object({
   // Produto: ignorado (fica 0). Serviço: mínimo de 5 minutos (conferido em withDuration).
   durationMinutes: z.number().int().min(0).max(600, 'Duração máxima de 10 horas.').optional(),
   priceCents: z.number().int().min(0, 'Preço inválido.').max(100_000_000),
+  // Custo mensal da conta (só produto). Vazio/0 = sem custo.
+  costCents: z.number().int().min(0, 'Custo inválido.').max(100_000_000).optional(),
   active: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
   // Produto que é conta de acesso (códigos por e-mail). Vazio = produto comum.
@@ -32,10 +35,13 @@ function withDuration<T extends { kind?: ServiceKind; durationMinutes?: number }
   const kind = body.kind ?? current?.kind ?? ServiceKind.SERVICE;
   const accessEmail = (body as { accessEmail?: string | null }).accessEmail;
   const access = accessEmail === undefined ? {} : { accessEmail: kind === ServiceKind.PRODUCT && accessEmail ? accessEmail : null };
-  if (kind === ServiceKind.PRODUCT) return { ...body, ...access, kind, durationMinutes: 0 };
+  // Custo de conta é só de produto; serviço sempre fica sem custo.
+  const rawCost = (body as { costCents?: number }).costCents;
+  const cost = rawCost === undefined ? {} : { costCents: kind === ServiceKind.PRODUCT ? rawCost : 0 };
+  if (kind === ServiceKind.PRODUCT) return { ...body, ...access, ...cost, kind, durationMinutes: 0 };
   const duration = body.durationMinutes ?? current?.durationMinutes ?? 0;
   if (duration < 5) throw HttpError.badRequest('Informe a duração do serviço (mínimo de 5 minutos).');
-  return { ...body, ...access, kind, durationMinutes: duration };
+  return { ...body, ...access, ...cost, kind, durationMinutes: duration };
 }
 
 export const servicesRouter = Router();
@@ -49,6 +55,44 @@ servicesRouter.get('/', asyncHandler(async (req: Request, res: Response) => {
     include: { _count: { select: { appointments: true } } },
   });
   return res.json({ services });
+}));
+
+// Lucro das contas de acesso (produtos): quantas pessoas em dia em cada conta,
+// receita (pessoas × preço de venda), custo (só cobrado se há ao menos uma
+// pessoa — conta vazia não gera custo) e lucro. Usado no catálogo.
+servicesRouter.get('/accounts-report', asyncHandler(async (req: Request, res: Response) => {
+  const companyId = companyOf(req);
+  const [products, activeByService] = await Promise.all([
+    prisma.service.findMany({
+      where: { companyId, kind: ServiceKind.PRODUCT },
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, priceCents: true, costCents: true, active: true, accessEmail: true },
+    }),
+    activeClientsByService(companyId),
+  ]);
+  const accounts = products.map((p) => {
+    const activeClients = activeByService.get(p.id) ?? 0;
+    const revenueCents = activeClients * p.priceCents;
+    // Conta sem ninguém logado não é cobrada.
+    const costCents = activeClients > 0 ? p.costCents : 0;
+    return {
+      id: p.id, name: p.name, accessEmail: p.accessEmail, active: p.active,
+      priceCents: p.priceCents, unitCostCents: p.costCents,
+      activeClients, revenueCents, costCents, profitCents: revenueCents - costCents,
+    };
+  });
+  const totals = accounts.reduce(
+    (acc, a) => ({
+      activeClients: acc.activeClients + a.activeClients,
+      // Contas com ao menos uma pessoa logada (as que de fato geram custo).
+      activeAccounts: acc.activeAccounts + (a.activeClients > 0 ? 1 : 0),
+      revenueCents: acc.revenueCents + a.revenueCents,
+      costCents: acc.costCents + a.costCents,
+      profitCents: acc.profitCents + a.profitCents,
+    }),
+    { activeClients: 0, activeAccounts: 0, revenueCents: 0, costCents: 0, profitCents: 0 },
+  );
+  return res.json({ accounts, totals: { ...totals, accounts: accounts.length } });
 }));
 
 // "Melhorar com IA" no formulário do serviço (ainda não salvo): devolve o texto sugerido.

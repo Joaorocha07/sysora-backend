@@ -25,6 +25,8 @@ const createSchema = z.object({
 });
 const renewSchema = z.object({ startDate: isoDay.optional(), months: months.optional(), priceCents: price.optional(), notes });
 const updateSchema = z.object({
+  // serviceId: troca o produto vinculado (null = assinatura avulsa, só pelo nome).
+  serviceId: z.string().uuid().nullish(),
   name: z.string().trim().min(1, 'Informe o nome.').max(120).optional(),
   priceCents: price.optional(),
   startDate: isoDay.optional(),

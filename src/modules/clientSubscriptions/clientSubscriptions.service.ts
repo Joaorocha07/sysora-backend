@@ -21,7 +21,7 @@ export type SubscriptionInput = {
   notes?: string | null;
 };
 export type RenewInput = { startDate?: string; months?: number; priceCents?: number; notes?: string | null };
-export type UpdateInput = Partial<Pick<SubscriptionInput, 'name' | 'priceCents' | 'startDate' | 'dueDate' | 'notes'>>;
+export type UpdateInput = Partial<Pick<SubscriptionInput, 'serviceId' | 'name' | 'priceCents' | 'startDate' | 'dueDate' | 'notes'>>;
 
 const include = {
   client: { select: { id: true, name: true, phone: true } },
@@ -57,8 +57,10 @@ function checkDates(startDate: string, dueDate: string) {
   if (dueDate <= startDate) throw HttpError.badRequest('O vencimento precisa ser depois da data da compra.');
 }
 
-// Assinatura atual de cada cliente (o período não cancelado com o maior
-// vencimento; sem nenhum, o último cancelado) e quantos períodos ele tem.
+// Assinatura atual de cada cliente POR PRODUTO (o período não cancelado com o
+// maior vencimento; sem nenhum, o último cancelado) e quantos períodos esse
+// produto tem. Cada produto do cliente vira uma linha — renovações do mesmo
+// produto se juntam numa só, contando os períodos.
 export async function listCurrent(companyId: string) {
   const rows = await prisma.clientSubscription.findMany({
     where: { companyId },
@@ -66,13 +68,18 @@ export async function listCurrent(companyId: string) {
     include,
   });
   rows.sort((a, b) => Number(Boolean(a.canceledAt)) - Number(Boolean(b.canceledAt)));
-  const byClient = new Map<string, (typeof rows)[number] & { periods: number }>();
+  // Chave por cliente + produto: serviceId quando houver, senão o nome
+  // normalizado (produto avulso, sem serviço vinculado).
+  const keyOf = (row: (typeof rows)[number]) =>
+    `${row.clientId}::${row.serviceId ?? `name:${row.name.trim().toLowerCase()}`}`;
+  const byProduct = new Map<string, (typeof rows)[number] & { periods: number }>();
   for (const row of rows) {
-    const current = byClient.get(row.clientId);
+    const key = keyOf(row);
+    const current = byProduct.get(key);
     if (current) current.periods += 1;
-    else byClient.set(row.clientId, { ...row, periods: 1 });
+    else byProduct.set(key, { ...row, periods: 1 });
   }
-  return [...byClient.values()];
+  return [...byProduct.values()];
 }
 
 // Todos os períodos de um cliente (inclusive os cancelados), do mais novo ao mais antigo.
@@ -131,6 +138,19 @@ export async function renew(companyId: string, id: string, input: RenewInput, no
 export async function update(companyId: string, id: string, input: UpdateInput) {
   const existing = await requireSubscription(companyId, id);
   const data: Prisma.ClientSubscriptionUpdateInput = {};
+  // Trocar o produto: valida que é da empresa e, quando o nome/preço não vêm
+  // no mesmo pedido, puxa do produto (o caso comum de "troquei de conta").
+  if (input.serviceId !== undefined) {
+    if (input.serviceId) {
+      const product = await prisma.service.findFirst({ where: { id: input.serviceId, companyId } });
+      if (!product) throw HttpError.notFound('Produto não encontrado.');
+      data.service = { connect: { id: product.id } };
+      if (input.name === undefined) data.name = product.name;
+      if (input.priceCents === undefined) data.priceCents = product.priceCents;
+    } else {
+      data.service = { disconnect: true };
+    }
+  }
   if (input.name !== undefined) data.name = input.name.trim();
   if (input.priceCents !== undefined) data.priceCents = input.priceCents;
   if (input.startDate !== undefined) data.startDate = input.startDate;
@@ -196,4 +216,22 @@ export async function activeClientsOf(companyId: string, serviceId: string, now 
     select: { clientId: true },
   });
   return rows.length;
+}
+
+// Quantas pessoas ativas (em dia, não canceladas) em cada produto/conta, de
+// uma vez só. Conta clientes distintos por produto — o mesmo cliente em dois
+// produtos conta uma vez em cada. Produtos sem ninguém ficam de fora do mapa
+// (quem chama assume 0). Usado no catálogo para custo/lucro.
+export async function activeClientsByService(companyId: string, now = new Date()): Promise<Map<string, number>> {
+  const rows = await prisma.clientSubscription.findMany({
+    where: { companyId, serviceId: { not: null }, canceledAt: null, dueDate: { gte: toIsoDate(now) } },
+    distinct: ['serviceId', 'clientId'],
+    select: { serviceId: true },
+  });
+  const byService = new Map<string, number>();
+  for (const { serviceId } of rows) {
+    if (!serviceId) continue;
+    byService.set(serviceId, (byService.get(serviceId) ?? 0) + 1);
+  }
+  return byService;
 }
