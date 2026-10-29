@@ -72,7 +72,7 @@ async function searchClientIdsByText(companyId: string, term: string): Promise<s
   // Escapa os curingas do LIKE para que % e _ sejam buscados como texto.
   const escaped = term.replace(/[\\%_]/g, (c) => `\\${c}`);
   const rows = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT "id" FROM "Client"
+    SELECT "id" FROM "clients"
     WHERE "companyId" = ${companyId}
       AND (
         translate(lower("name"), ${ACCENTED}, ${PLAIN})
